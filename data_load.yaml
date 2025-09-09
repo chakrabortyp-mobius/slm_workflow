@@ -2,13 +2,13 @@ name: HuggingFace Dataset Text Exporter
 description: Exports any Hugging Face dataset to a newline-delimited text file with automatic text field detection and configurable export options.
 
 inputs:
-  - {name: Dataset Name, type: String, default: 'roneneldan/TinyStories', description: 'Dataset name from Hugging Face Hub (e.g., roneneldan/TinyStories, ag_news)'}
-  - {name: Config Name, type: String, default: '', description: 'Dataset configuration name (leave empty if not required)'}
-  - {name: Split Name, type: String, default: 'train', description: 'Dataset split to export (train, validation, test, etc.)'}
-  - {name: Text Fields, type: String, default: '', description: 'Comma-separated text field names to export (auto-detected if empty)'}
-  - {name: Field Separator, type: String, default: ' ', description: 'Separator for joining multiple text fields'}
-  - {name: Max Rows, type: Integer, default: '0', description: 'Maximum rows to export (0 for unlimited)'}
-  - {name: Use Streaming, type: Boolean, default: 'false', description: 'Enable streaming mode for very large datasets'}
+  - {name: Dataset Name, type: String, description: 'Dataset name from Hugging Face Hub (e.g., roneneldan/TinyStories, ag_news)'}
+  - {name: Config Name, type: String, description: 'Dataset configuration name (leave empty if not required)'}
+  - {name: Split Name, type: String, description: 'Dataset split to export (train, validation, test, etc.)'}
+  - {name: Text Fields, type: String, description: 'Comma-separated text field names to export (auto-detected if empty)'}
+  - {name: Field Separator, type: String, description: 'Separator for joining multiple text fields'}
+  - {name: Max Rows, type: Integer, description: 'Maximum rows to export (0 for unlimited)'}
+  - {name: Use Streaming, type: Boolean, description: 'Enable streaming mode for very large datasets'}
 
 outputs:
   - {name: Text File, type: Data, description: 'Exported dataset as newline-delimited text file'}
