@@ -1,15 +1,19 @@
-name: HF Text Dataset → TXT Exporter
-description: Loads a Hugging Face text dataset split and writes it to a newline-delimited .txt file (one example per line).
+name: HuggingFace Dataset Text Exporter
+description: Exports a Hugging Face dataset split to a newline-delimited text file, with automatic text field detection and configurable options.
+
 inputs:
-  - {name: Dataset Name, type: String, default: 'roneneldan/TinyStories', description: 'Hugging Face dataset path, e.g., roneneldan/TinyStories or ag_news', optional: false}
-  - {name: Config, type: String, default: '', description: 'Optional dataset config (leave blank if none)', optional: true}
-  - {name: Split, type: String, default: 'train', description: 'Split to export (e.g., train/validation/test)', optional: true}
-  - {name: Text Fields, type: String, default: '', description: 'Comma-separated text columns to export. If blank, will try to auto-detect', optional: true}
-  - {name: Separator, type: String, default: ' ', description: 'Separator to join multiple text fields', optional: true}
-  - {name: Streaming, type: Boolean, default: 'false', description: 'Use streaming mode for very large datasets', optional: true}
-  - {name: Max Rows, type: Integer, default: '0', description: 'Optional cap on rows to write (0 means no cap)', optional: true}
+  - {name: Dataset Name, type: String, default: 'roneneldan/TinyStories', description: 'Dataset path on the Hub (e.g. roneneldan/TinyStories or ag_news)'}
+  - {name: Dataset Config, type: String, default: '', description: 'Dataset config name (leave empty if not required)'}
+  - {name: Split Name, type: String, default: 'train', description: 'Split to export (e.g. train/validation/test)'}
+  - {name: Text Fields, type: String, default: '', description: 'Comma-separated list of text columns to export (auto-detected if empty)'}
+  - {name: Field Separator, type: String, default: ' ', description: 'Separator used when joining multiple text fields'}
+  - {name: Max Rows, type: Integer, default: '0', description: 'Maximum number of rows to export (0 for unlimited)'}
+  - {name: Use Streaming, type: Boolean, default: 'false', description: 'Use streaming mode for very large datasets'}
+
 outputs:
-  - {name: Text File, type: Data, description: 'Plaintext .txt file containing one example per line from the chosen split'}
+  - {name: Text File, type: Data, description: 'Exported dataset as newline-delimited text file'}
+  - {name: Export Metadata, type: Data, description: 'Export metadata and statistics in JSON format'}
+
 implementation:
   container:
     image: python:3.9
@@ -19,119 +23,211 @@ implementation:
       - |
         set -o pipefail
         export PIP_DISABLE_PIP_VERSION_CHECK=1
+        
+        # Install required packages
         python3 -m pip install --quiet datasets tqdm || python3 -m pip install --quiet --user datasets tqdm
-
-        # Write the Python exporter to disk
-        cat >/tmp/program.py <<'PY'
-        import argparse, os, sys
+        
+        # Write the dataset export program to disk
+        cat >/tmp/export_dataset.py <<'PY'
+        #!/usr/bin/env python3
+        import argparse
         from typing import List, Optional
         from datasets import load_dataset, Features, Value, IterableDataset, Dataset
+        import sys
+        import os
+        import json
+        from datetime import datetime
 
-        try:
-            from tqdm import tqdm
-        except Exception:
-            def tqdm(x, **k): return x  # no-op fallback
+        TRY_TQDM = True
+        if TRY_TQDM:
+            try:
+                from tqdm import tqdm
+            except Exception:
+                tqdm = lambda x, **k: x  # no-op if tqdm is unavailable
 
         def guess_text_fields(features: Optional[Features], prefer: List[str]) -> List[str]:
             if features is None:
-                return prefer
-            candidates = [name for name, feat in features.items()
-                          if isinstance(feat, Value) and feat.dtype in ("string", "large_string")]
-            if candidates:
-                return candidates
-            for n in prefer:
-                if n in features:
-                    return [n]
+                return prefer  # streaming sometimes lacks full schema; fall back to common names
+
+            # 1) columns explicitly typed as (large_)string
+            candidates = []
             for name, feat in features.items():
-                if isinstance(feat, Value):
-                    return [name]
-            return []
+                if isinstance(feat, Value) and (feat.dtype in ("string", "large_string")):
+                    candidates.append(name)
+
+            # 2) if none, try common names in order
+            if not candidates:
+                for n in prefer:
+                    if n in features:
+                        candidates.append(n)
+
+            # 3) final fallback: first column that looks like text-ish value
+            if not candidates and len(features) > 0:
+                # choose first Value column
+                for name, feat in features.items():
+                    if isinstance(feat, Value):
+                        candidates = [name]
+                        break
+
+            return candidates
 
         def build_text(example: dict, fields: List[str], sep: str) -> Optional[str]:
-            parts = []
+            pieces = []
             for f in fields:
-                v = example.get(f, None)
-                if v is None:
+                val = example.get(f, None)
+                if val is None:
                     continue
-                if isinstance(v, list):
-                    v = " ".join(map(str, v))
-                parts.append(str(v))
-            if not parts:
+                if isinstance(val, list):
+                    val = " ".join(map(str, val))
+                else:
+                    val = str(val)
+                pieces.append(val)
+            if not pieces:
                 return None
-            s = sep.join(parts).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
-            return s
+            text = sep.join(pieces).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+            return text
 
-        def export_iter(ds_iter, out_path: str, fields: List[str], sep: str, max_rows: Optional[int]):
-            n = 0
+        def export_streaming(ds, out_path: str, fields: List[str], sep: str, max_rows: Optional[int]):
+            count = 0
             with open(out_path, "w", encoding="utf-8") as f:
-                for ex in tqdm(ds_iter, desc="Writing", unit="rows"):
+                for ex in tqdm(ds, desc="Writing", unit="rows"):
                     s = build_text(ex, fields, sep)
                     if s:
                         f.write(s + "\n")
-                        n += 1
-                        if max_rows and n >= max_rows:
+                        count += 1
+                        if max_rows and count >= max_rows:
                             break
-            return n
+            return count
+
+        def export_in_memory(ds: Dataset, out_path: str, fields: List[str], sep: str, max_rows: Optional[int]):
+            count = 0
+            with open(out_path, "w", encoding="utf-8") as f:
+                for ex in tqdm(ds, desc="Writing", unit="rows"):
+                    s = build_text(ex, fields, sep)
+                    if s:
+                        f.write(s + "\n")
+                        count += 1
+                        if max_rows and count >= max_rows:
+                            break
+            return count
 
         def main():
-            ap = argparse.ArgumentParser()
-            ap.add_argument("--dataset-name", required=True)
-            ap.add_argument("--config", default="")
-            ap.add_argument("--split", default="train")
-            ap.add_argument("--text-fields", default="")
-            ap.add_argument("--sep", default=" ")
-            ap.add_argument("--streaming", action="store_true")
-            ap.add_argument("--max-rows", type=int, default=0)
-            ap.add_argument("--output-path", required=True)
-            args = ap.parse_args()
+            p = argparse.ArgumentParser(description="Export a Hugging Face text dataset split to a newline-delimited .txt")
+            p.add_argument("--dataset", required=True, help="Dataset path on the Hub")
+            p.add_argument("--config", default=None, help="Dataset config name")
+            p.add_argument("--split", default="train", help="Split to export")
+            p.add_argument("--text-fields", default=None, help="Comma-separated list of text columns")
+            p.add_argument("--sep", default=" ", help="Separator for joining multiple text fields")
+            p.add_argument("--output", required=True, help="Output .txt path")
+            p.add_argument("--metadata-output", required=True, help="Output metadata JSON path")
+            p.add_argument("--streaming", action="store_true", help="Use streaming mode")
+            p.add_argument("--max-rows", type=int, default=None, help="Max number of rows to write")
+            args = p.parse_args()
 
-            os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
+            start_time = datetime.now()
+            prefer_names = ["text", "content", "sentence", "document", "article"]
 
-            prefer = ["text", "content", "sentence", "document", "article", "title"]
+            # Create output directories
+            os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+            os.makedirs(os.path.dirname(args.metadata_output) or ".", exist_ok=True)
 
-            cfg = args.config or None
-            ds = load_dataset(args.dataset_name, cfg, split=args.split, streaming=args.streaming)
+            try:
+                # Load dataset
+                print(f"[INFO] Loading dataset: {args.dataset}")
+                config_name = args.config if args.config and args.config.strip() else None
+                ds = load_dataset(args.dataset, config_name, split=args.split, streaming=args.streaming)
+                
+                # Determine text fields
+                if args.text_fields and args.text_fields.strip():
+                    fields = [x.strip() for x in args.text_fields.split(",") if x.strip()]
+                else:
+                    features = None
+                    try:
+                        features = getattr(ds, "features", None)
+                    except Exception:
+                        features = None
+                    fields = guess_text_fields(features, prefer_names)
+                    if not fields:
+                        raise ValueError("Could not infer text fields. Please specify text-fields explicitly.")
 
-            if args.text_fields.strip():
-                fields = [x.strip() for x in args.text_fields.split(",") if x.strip()]
-            else:
-                features = getattr(ds, "features", None)
-                fields = guess_text_fields(features, prefer)
-                if not fields:
-                    print("ERROR: Could not infer text fields. Provide --text-fields.", file=sys.stderr)
-                    sys.exit(2)
+                print(f"[INFO] Using text fields: {fields}")
+                print(f"[INFO] Field separator: '{args.sep}'")
+                
+                # Export
+                if isinstance(ds, IterableDataset):
+                    print("[INFO] Using streaming export mode")
+                    n = export_streaming(ds, args.output, fields, args.sep, args.max_rows)
+                else:
+                    print("[INFO] Using in-memory export mode")
+                    n = export_in_memory(ds, args.output, fields, args.sep, args.max_rows)
 
-            max_rows = args.max_rows if args.max_rows > 0 else None
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
 
-            if isinstance(ds, IterableDataset):
-                n = export_iter(ds, args.output_path, fields, args.sep, max_rows)
-            else:
-                n = export_iter(ds, args.output_path, fields, args.sep, max_rows)
+                # Create metadata
+                metadata = {
+                    'dataset_name': args.dataset,
+                    'config_name': config_name,
+                    'split_name': args.split,
+                    'text_fields_used': fields,
+                    'field_separator': args.sep,
+                    'streaming_mode': args.streaming,
+                    'max_rows_limit': args.max_rows,
+                    'exported_lines': n,
+                    'output_file': args.output,
+                    'export_start_time': start_time.isoformat(),
+                    'export_end_time': end_time.isoformat(),
+                    'export_duration_seconds': duration,
+                    'status': 'success'
+                }
 
-            print(f"[SUCCESS] Wrote {n} lines to {args.output_path}")
-            print(f"[INFO] Using fields: {fields}")
+                # Save metadata
+                with open(args.metadata_output, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2)
+
+                print(f"[SUCCESS] Wrote {n} lines to {args.output}")
+                print(f"[SUCCESS] Export completed in {duration:.2f} seconds")
+                
+            except Exception as e:
+                error_metadata = {
+                    'dataset_name': args.dataset,
+                    'config_name': args.config,
+                    'split_name': args.split,
+                    'error_message': str(e),
+                    'status': 'failed',
+                    'export_start_time': start_time.isoformat(),
+                    'export_end_time': datetime.now().isoformat()
+                }
+                
+                with open(args.metadata_output, 'w', encoding='utf-8') as f:
+                    json.dump(error_metadata, f, indent=2)
+                
+                print(f"[ERROR] Export failed: {e}", file=sys.stderr)
+                sys.exit(1)
 
         if __name__ == "__main__":
             main()
         PY
-
-        # Run the exporter.
-        # NOTE: For "bash -c", $0 is the first arg after the script, $1 is the next, etc.
-        python3 -u /tmp/program.py \
-          --dataset-name "$0" \
+        
+        # Execute the export program with proper argument mapping
+        python3 -u /tmp/export_dataset.py \
+          --dataset "$0" \
           --config "$1" \
           --split "$2" \
           --text-fields "$3" \
           --sep "$4" \
-          $(test "$5" = "true" && echo --streaming || true) \
-          $(test "$6" -gt 0 2>/dev/null && echo --max-rows "$6" || true) \
-          --output-path "$7"
-    args:
-      - {inputValue: Dataset Name}
-      - {inputValue: Config}
-      - {inputValue: Split}
-      - {inputValue: Text Fields}
-      - {inputValue: Separator}
-      - {inputValue: Streaming}
-      - {inputValue: Max Rows}
-      - {outputPath: Text File}
+          --max-rows $([ "$5" -eq 0 ] && echo "" || echo "$5") \
+          $([ "$6" = "true" ] && echo "--streaming" || echo "") \
+          --output "$7" \
+          --metadata-output "$8"
+
+  args:
+    - {inputValue: Dataset Name}
+    - {inputValue: Dataset Config}
+    - {inputValue: Split Name}
+    - {inputValue: Text Fields}
+    - {inputValue: Field Separator}
+    - {inputValue: Max Rows}
+    - {inputValue: Use Streaming}
+    - {outputPath: Text File}
+    - {outputPath: Export Metadata}
