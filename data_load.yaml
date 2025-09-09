@@ -55,7 +55,7 @@ implementation:
 
 
         class DatasetTextExporter:
-            """Handles exporting Hugging Face datasets to text files."""
+            #"""Handles exporting Hugging Face datasets to text files."""
             
             def __init__(self):
                 self.exported_count = 0
@@ -63,7 +63,7 @@ implementation:
                 self.end_time = None
             
             def detect_text_fields(self, dataset, preferred_fields: List[str] = None) -> List[str]:
-                """Automatically detect text fields in the dataset."""
+                #"""Automatically detect text fields in the dataset."""
                 if preferred_fields is None:
                     preferred_fields = ["text", "content", "sentence", "document", "article", "body", "message"]
                 
@@ -96,7 +96,7 @@ implementation:
                 return text_fields
             
             def process_example(self, example: dict, text_fields: List[str], separator: str = " ") -> Optional[str]:
-                """Process a single example and extract text content."""
+                #"""Process a single example and extract text content."""
                 text_parts = []
                 
                 for field in text_fields:
@@ -131,7 +131,7 @@ implementation:
                               separator: str = " ",
                               max_rows: int = None,
                               streaming: bool = False) -> dict:
-                """Export dataset to text file and return metadata."""
+                #"""Export dataset to text file and return metadata."""
                 
                 self.start_time = datetime.now()
                 print(f"[INFO] Starting export of {dataset_name}")
