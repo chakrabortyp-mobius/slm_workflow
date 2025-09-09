@@ -18,6 +18,9 @@ inputs:
   - name: max_rows
     type: String
     default: "0"    # 0 means no limit
+  - name: streaming
+    type: String
+    default: "false"
 outputs:
   - name: exported_text
     type: Data
