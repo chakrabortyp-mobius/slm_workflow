@@ -30,7 +30,7 @@ implementation:
       - python3
       - -u
       - -c
-      - |-
+      - |
         import subprocess, sys
         # Install deps first (quietly)
         subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", "datasets", "tqdm"], check=True)
@@ -46,14 +46,12 @@ implementation:
             tqdm = lambda x, **kwargs: x  # fallback
 
         class DatasetTextExporter:
-            # Exports Hugging Face datasets to text files.
             def __init__(self):
                 self.exported_count = 0
                 self.start_time = None
                 self.end_time = None
 
             def detect_text_fields(self, dataset, preferred_fields: List[str] = None) -> List[str]:
-                # Automatically detect text fields.
                 if preferred_fields is None:
                     preferred_fields = ["text", "content", "sentence", "document", "article", "body", "message"]
                 features = getattr(dataset, "features", None)
@@ -75,7 +73,6 @@ implementation:
                 return text_fields
 
             def process_example(self, example: dict, text_fields: List[str], separator: str = " ") -> Optional[str]:
-                # Extract and join text parts from one example.
                 text_parts = []
                 for field in text_fields:
                     value = example.get(field)
@@ -90,8 +87,8 @@ implementation:
                 if not text_parts:
                     return None
                 result = separator.join(text_parts)
-                result = result.replace("\r\n", "\n")
-                result = result.replace("\r", "\n")
+                result = result.replace("\\r\\n", "\\n")
+                result = result.replace("\\r", "\\n")
                 return result.strip()
 
             def export_dataset(
@@ -105,7 +102,6 @@ implementation:
                 max_rows: int = None,
                 streaming: bool = False
             ) -> dict:
-                # Export dataset and return metadata.
                 self.start_time = datetime.now()
                 print(f"[INFO] Starting export of {dataset_name}")
                 try:
@@ -129,7 +125,7 @@ implementation:
                         for example in iterator:
                             processed_text = self.process_example(example, text_fields, separator)
                             if processed_text:
-                                f.write(processed_text + "\n")
+                                f.write(processed_text + "\\n")
                                 self.exported_count += 1
                                 if max_rows and self.exported_count >= max_rows:
                                     print(f"[INFO] Reached maximum row limit: {max_rows}")
@@ -212,18 +208,18 @@ implementation:
             main()
     args:
       - --dataset
-      - inputValue: dataset
+      - {inputValue: dataset}
       - --output
-      - outputPath: exported_text
+      - {outputPath: exported_text}
       - --config
-      - inputValue: config
+      - {inputValue: config}
       - --split
-      - inputValue: split
+      - {inputValue: split}
       - --text-fields
-      - inputValue: text_fields
+      - {inputValue: text_fields}
       - --separator
-      - inputValue: separator
+      - {inputValue: separator}
       - --max-rows
-      - inputValue: max_rows
+      - {inputValue: max_rows}
       - --metadata-output
-      - outputPath: metadata_json
+      - {outputPath: metadata_json}
