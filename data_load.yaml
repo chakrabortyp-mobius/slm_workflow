@@ -1,40 +1,39 @@
 name: HuggingFace Dataset Text Exporter
-description: Exports any Hugging Face dataset to a newline-delimited text file with automatic text field detection and configurable export options.
-
+description: Exports a Hugging Face dataset to a newline-delimited text file with automatic text-field detection and optional metadata.
 inputs:
-  - {name: Dataset Name, type: String, description: 'Dataset name from Hugging Face Hub (e.g., roneneldan/TinyStories, ag_news)'}
-  - {name: Config Name, type: String, description: 'Dataset configuration name (leave empty if not required)'}
-  - {name: Split Name, type: String, description: 'Dataset split to export (train, validation, test, etc.)'}
-  - {name: Text Fields, type: String, description: 'Comma-separated text field names to export (auto-detected if empty)'}
-  - {name: Field Separator, type: String, description: 'Separator for joining multiple text fields'}
-  - {name: Max Rows, type: Integer, description: 'Maximum rows to export (0 for unlimited)'}
-  - {name: Use Streaming, type: Boolean, description: 'Enable streaming mode for very large datasets'}
-
+  - name: dataset
+    type: String
+  - name: config
+    type: String
+    default: ""
+  - name: split
+    type: String
+    default: "train"
+  - name: text_fields
+    type: String
+    default: ""     # Comma-separated field names; leave empty to auto-detect
+  - name: separator
+    type: String
+    default: " "
+  - name: max_rows
+    type: String
+    default: "0"    # 0 means no limit
 outputs:
-  - {name: Text File, type: Data, description: 'Exported dataset as newline-delimited text file'}
-  - {name: Export Metadata, type: Data, description: 'Export statistics and metadata in JSON format'}
-
+  - name: exported_text
+    type: Data
+  - name: metadata_json
+    type: Data
 implementation:
   container:
-    image: python:3.9-slim
+    image: python:3.9
     command:
       - bash
       - -ec
-      - |
-        set -e
-        
-        # Install required packages
-        echo "[INFO] Installing required packages..."
-        pip install --quiet --no-cache-dir datasets tqdm
-        
-        # Create the export script
-        cat > /tmp/hf_dataset_exporter.py << 'EOF'
-        #!/usr/bin/env python3
-        """
-        Hugging Face Dataset to Text File Exporter
-        Exports any HuggingFace dataset to a newline-delimited text file.
-        """
-
+      - |-
+        set -o pipefail
+        python3 -m pip install --quiet --no-cache-dir datasets tqdm
+        # Run inlined Python and forward all KFP/Elyra args to it:
+        python3 -u - "$@" <<'PY'
         import argparse
         import json
         import os
@@ -267,69 +266,21 @@ implementation:
 
         if __name__ == "__main__":
             main()
-        EOF
-        
-        # Make the script executable
-        chmod +x /tmp/hf_dataset_exporter.py
-        
-        # Parse arguments and set defaults
-        DATASET_NAME="$0"
-        CONFIG_NAME="$1"
-        SPLIT_NAME="$2"
-        TEXT_FIELDS="$3"
-        SEPARATOR="$4"
-        MAX_ROWS="$5"
-        USE_STREAMING="$6"
-        OUTPUT_FILE="$7"
-        METADATA_FILE="$8"
-        
-        # Build command arguments
-        CMD_ARGS="--dataset \"$DATASET_NAME\" --output \"$OUTPUT_FILE\" --metadata-output \"$METADATA_FILE\""
-        
-        if [ -n "$CONFIG_NAME" ] && [ "$CONFIG_NAME" != "" ]; then
-            CMD_ARGS="$CMD_ARGS --config \"$CONFIG_NAME\""
-        fi
-        
-        if [ -n "$SPLIT_NAME" ] && [ "$SPLIT_NAME" != "" ]; then
-            CMD_ARGS="$CMD_ARGS --split \"$SPLIT_NAME\""
-        fi
-        
-        if [ -n "$TEXT_FIELDS" ] && [ "$TEXT_FIELDS" != "" ]; then
-            CMD_ARGS="$CMD_ARGS --text-fields \"$TEXT_FIELDS\""
-        fi
-        
-        if [ -n "$SEPARATOR" ] && [ "$SEPARATOR" != "" ]; then
-            CMD_ARGS="$CMD_ARGS --separator \"$SEPARATOR\""
-        fi
-        
-        if [ -n "$MAX_ROWS" ] && [ "$MAX_ROWS" != "0" ]; then
-            CMD_ARGS="$CMD_ARGS --max-rows $MAX_ROWS"
-        fi
-        
-        if [ "$USE_STREAMING" = "true" ]; then
-            CMD_ARGS="$CMD_ARGS --streaming"
-        fi
-        
-        # Execute the export
-        echo "[INFO] Executing: python3 /tmp/hf_dataset_exporter.py $CMD_ARGS"
-        eval "python3 /tmp/hf_dataset_exporter.py $CMD_ARGS"
-
+        PY
     args:
       - --dataset
-      - {inputValue: Dataset Name}
-      - --config
-      - {inputValue: Config Name}
-      - --split
-      - {inputValue: Split Name}
-      - --text-fields
-      - {inputValue: Text Fields}
-      - --separator
-      - {inputValue: Field Separator}
-      - --max-rows
-      - {inputValue: Max Rows}
-      - --streaming
-      - {inputValue: Use Streaming}
+      - inputValue: dataset
       - --output
-      - {outputPath: Text File}
+      - outputPath: exported_text
+      - --config
+      - inputValue: config
+      - --split
+      - inputValue: split
+      - --text-fields
+      - inputValue: text_fields
+      - --separator
+      - inputValue: separator
+      - --max-rows
+      - inputValue: max_rows
       - --metadata-output
-      - {outputPath: Export Metadata}
+      - outputPath: metadata_json
