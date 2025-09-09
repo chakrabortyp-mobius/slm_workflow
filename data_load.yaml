@@ -314,22 +314,22 @@ implementation:
         echo "[INFO] Executing: python3 /tmp/hf_dataset_exporter.py $CMD_ARGS"
         eval "python3 /tmp/hf_dataset_exporter.py $CMD_ARGS"
 
-  args:
-    - --dataset
-    - {inputValue: Dataset Name}
-    - --config
-    - {inputValue: Config Name}
-    - --split
-    - {inputValue: Split Name}
-    - --text-fields
-    - {inputValue: Text Fields}
-    - --separator
-    - {inputValue: Field Separator}
-    - --max-rows
-    - {inputValue: Max Rows}
-    - --streaming
-    - {inputValue: Use Streaming}
-    - --output
-    - {outputPath: Text File}
-    - --metadata-output
-    - {outputPath: Export Metadata}
+    args:
+      - --dataset
+      - {inputValue: Dataset Name}
+      - --config
+      - {inputValue: Config Name}
+      - --split
+      - {inputValue: Split Name}
+      - --text-fields
+      - {inputValue: Text Fields}
+      - --separator
+      - {inputValue: Field Separator}
+      - --max-rows
+      - {inputValue: Max Rows}
+      - --streaming
+      - {inputValue: Use Streaming}
+      - --output
+      - {outputPath: Text File}
+      - --metadata-output
+      - {outputPath: Export Metadata}
