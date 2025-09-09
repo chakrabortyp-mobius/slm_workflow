@@ -1,1 +1,164 @@
+name: Text Data Loader (HF datasets)
+description: Loads raw .txt data (file or directory) via Hugging Face datasets, cleans/filters/deduplicates, and writes processed training text with metadata and stats.
+inputs:
+  - {name: Input Path, type: Data, description: 'Path to .txt file or directory of .txt files'}
+  - {name: Lowercase, type: Boolean, default: 'false', description: 'Convert lines to lowercase'}
+  - {name: Dedupe, type: Boolean, default: 'true', description: 'Remove duplicate lines'}
+  - {name: Min Length, type: Integer, default: '1', description: 'Minimum line length to keep'}
+  - {name: Max Lines, type: Integer, default: '0', description: 'Cap kept lines; 0 = no cap'}
+outputs:
+  - {name: Processed Text, type: Data, description: 'Cleaned training text (.txt)'}
+  - {name: Rejected Lines, type: Data, description: 'Lines filtered out (.txt)'}
+  - {name: Metadata, type: Data, description: 'Run metadata (JSON)'}
+  - {name: Statistics, type: Data, description: 'Basic corpus statistics (JSON)'}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - bash
+      - -ec
+      - |
+        set -o pipefail
+        export PIP_DISABLE_PIP_VERSION_CHECK=1
+        python3 -m pip install --quiet --no-cache-dir \
+          datasets==2.20.0 tokenizers==0.15.2 pyarrow==16.1.0 xxhash==3.4.1 || \
+        python3 -m pip install --quiet --user --no-cache-dir \
+          datasets==2.20.0 tokenizers==0.15.2 pyarrow==16.1.0 xxhash==3.4.1
 
+        # Write the program to disk
+        cat >/tmp/program.py <<'PY'
+import argparse, os, json, time
+from datetime import datetime
+from pathlib import Path
+from datasets import load_dataset
+from tokenizers import Tokenizer  # imported as requested
+
+def expand_data_files(input_path: str) -> dict:
+    p = Path(input_path)
+    if p.is_file():
+        if p.suffix.lower() != ".txt":
+            raise ValueError(f"Input file must be .txt, got: {p}")
+        return {"train": str(p)}
+    if p.is_dir():
+        return {"train": str(p / "**" / "*.txt")}
+    raise FileNotFoundError(f"Input path not found: {input_path}")
+
+def process_examples(ds, lowercase, min_len, dedupe, max_lines):
+    total_read = 0
+    kept, rejected = [], []
+    seen = set()
+    def seen_add(x):
+        if x in seen: return True
+        seen.add(x); return False
+
+    for s in ds["train"]["text"]:
+        if s is None:
+            rejected.append("")
+            total_read += 1
+            continue
+        total_read += 1
+        line = s.rstrip("\n\r")
+        if lowercase: line = line.lower()
+        if len(line.strip()) < min_len:
+            rejected.append(s.rstrip("\n\r")); continue
+        if dedupe and seen_add(line):
+            rejected.append(s.rstrip("\n\r")); continue
+        kept.append(line)
+        if max_lines is not None and len(kept) >= max_lines: break
+    return total_read, kept, rejected
+
+def compute_stats(kept, rejected, total_read):
+    if kept:
+        lengths = [len(x) for x in kept]
+        avg_len = sum(lengths) / len(lengths)
+        return {
+            "totals": {"lines_read": int(total_read), "lines_kept": int(len(kept)), "lines_rejected": int(len(rejected))},
+            "quality": {"kept_ratio_pct": (len(kept) / total_read * 100.0) if total_read else 0.0},
+            "lengths": {"avg_len": float(avg_len), "min_len": int(min(lengths)), "max_len": int(max(lengths)), "total_chars": int(sum(lengths))},
+        }
+    return {
+        "totals": {"lines_read": int(total_read), "lines_kept": 0, "lines_rejected": int(len(rejected))},
+        "quality": {"kept_ratio_pct": 0.0},
+        "lengths": {"avg_len": 0.0, "min_len": 0, "max_len": 0, "total_chars": 0},
+    }
+
+def main():
+    ap = argparse.ArgumentParser(description="Text Data Loader using HF datasets")
+    ap.add_argument("--input_path", required=True)
+    ap.add_argument("--output_text", required=True)
+    ap.add_argument("--metadata_out", required=True)
+    ap.add_argument("--statistics_out", required=True)
+    ap.add_argument("--rejected_out", required=True)
+    ap.add_argument("--lowercase", action="store_true")
+    ap.add_argument("--dedupe", action="store_true")
+    ap.add_argument("--min_len", type=int, default=1)
+    ap.add_argument("--max_lines", type=int, default=0)
+    args = ap.parse_args()
+
+    start_ts = time.time()
+    data_files = expand_data_files(args.input_path)
+    ds = load_dataset("text", data_files=data_files)
+
+    max_lines = args.max_lines if args.max_lines and args.max_lines > 0 else None
+    total_read, kept, rejected = process_examples(ds, args.lowercase, args.min_len, args.dedupe, max_lines)
+
+    for p in [args.output_text, args.metadata_out, args.statistics_out, args.rejected_out]:
+        d = os.path.dirname(p)
+        if d: os.makedirs(d, exist_ok=True)
+
+    with open(args.output_text, "w", encoding="utf-8") as f:
+        for line in kept: f.write(line + "\n")
+    with open(args.rejected_out, "w", encoding="utf-8") as f:
+        for line in rejected: f.write(line + "\n")
+
+    stats = compute_stats(kept, rejected, total_read)
+    with open(args.statistics_out, "w", encoding="utf-8") as f:
+        json.dump(stats, f, indent=2)
+
+    metadata = {
+        "loader": "hf-datasets-text",
+        "input_path": args.input_path,
+        "lowercase": bool(args.lowercase),
+        "dedupe": bool(args.dedupe),
+        "min_len": int(args.min_len),
+        "max_lines": int(args.max_lines) if args.max_lines else 0,
+        "processed_output": args.output_text,
+        "rejected_output": args.rejected_out,
+        "created_at": datetime.now().isoformat(),
+        "duration_sec": round(time.time() - start_ts, 3),
+        "version": "1.0.0",
+    }
+    with open(args.metadata_out, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"[SUCCESS] Kept {len(kept)} / {total_read} lines.")
+    print(f"[INFO] Processed text: {args.output_text}")
+    print(f"[INFO] Rejected lines: {args.rejected_out}")
+    print(f"[INFO] Statistics: {args.statistics_out}")
+    print(f"[INFO] Metadata: {args.metadata_out}")
+
+if __name__ == "__main__":
+    main()
+PY
+
+        # ✅ For `bash -c`, $0 is first arg after script, $1 is second, etc.
+        python3 -u /tmp/program.py \
+          --input_path     "$0" \
+          --output_text    "$1" \
+          --metadata_out   "$2" \
+          --statistics_out "$3" \
+          --rejected_out   "$4" \
+          $( [ "$5" = "true" ] && printf -- "--lowercase " ) \
+          $( [ "$6" = "true" ] && printf -- "--dedupe " ) \
+          --min_len        "$7" \
+          --max_lines      "$8"
+  args:
+    - {inputPath: Input Path}
+    - {outputPath: Processed Text}
+    - {outputPath: Metadata}
+    - {outputPath: Statistics}
+    - {outputPath: Rejected Lines}
+    - {inputValue: Lowercase}
+    - {inputValue: Dedupe}
+    - {inputValue: Min Length}
+    - {inputValue: Max Lines}
