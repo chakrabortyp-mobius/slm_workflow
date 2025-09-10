@@ -365,7 +365,7 @@ implementation:
                 json.dump(GEMMA3_CONFIG, f, indent=2)
             with open(args.model_summary, "w", encoding="utf-8") as f:
                 f.write(str(model) + "\n")
-                f.write(f"Total params: {total_params:,} | Trainable: {trainable_params:,}\n")
+                f.write(f"Total params  {total_params:,} | Trainable: {trainable_params:,}\n")
 
             print("Model initialized and saved.")
 
