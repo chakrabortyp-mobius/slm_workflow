@@ -3,21 +3,21 @@ description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pa
 
 inputs:
   - name: tokenizer_json
-    type: Model        # Output of your tokenizer brick
+    type: Model
   - name: n_layers
     type: Integer
     default: "6"
   - name: layer_pattern
     type: String
-    default: "S*3,F*1,S*2"   # e.g., S*3,F*1,S*2
+    default: "S*3,F*1,S*2"
 
 outputs:
   - name: model_weights
-    type: Model        # state_dict .pt
+    type: Model
   - name: model_config
-    type: Data         # config.json
+    type: Data
   - name: model_summary
-    type: Data         # model_summary.txt
+    type: Data
 
 implementation:
   container:
@@ -28,9 +28,10 @@ implementation:
       - |-
         set -o pipefail
 
-        # Install deps
+        # Install deps (CPU torch)
         python3 -m pip install --quiet --no-cache-dir torch tokenizers
 
+        # Inline Python (no triple-quoted strings to keep Elyra/black happy)
         python3 -u - "$@" <<'PY'
         import argparse, json, os, sys
         import torch
@@ -42,6 +43,7 @@ implementation:
         # Utilities
         # -------------------------
         def pattern_to_layers(pattern: str, n_layers: int):
+            # Accept tokens S/F with optional multiplier, e.g. "S*3,F*1,S*2"
             def norm(tok: str) -> str:
                 t = tok.strip().lower()
                 if t in ("s", "sliding", "sliding_attention"):
@@ -58,7 +60,10 @@ implementation:
                 if "*" in part:
                     t_raw, c_raw = part.split("*", 1)
                     t = norm(t_raw)
-                    c = int(c_raw)
+                    try:
+                        c = int(c_raw)
+                    except Exception:
+                        raise ValueError(f"Invalid count in block '{part}'")
                     if c <= 0:
                         raise ValueError(f"Count must be > 0 in block '{part}'")
                 else:
@@ -337,7 +342,7 @@ implementation:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model_dtype = torch.float16 if device == "cuda" else torch.float32
 
-            # Fixed config parts per your request
+            # Fixed config parts
             GEMMA3_CONFIG = {
                 "vocab_size": vocab_size,
                 "context_length": 2048,
@@ -366,8 +371,12 @@ implementation:
             model.sin_local = model.sin_local.to(device)
             model.eval()
 
-            # Print human-readable summary to logs
-            print(f"\n=== Model Summary ===\n{model}\n")
+            # Print concise summary (no triple quotes)
+            print("=== Model Summary ===")
+            print(model)
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Total params: {total_params:,} | Trainable: {trainable_params:,}")
 
             # Persist outputs
             os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
@@ -379,6 +388,7 @@ implementation:
                 json.dump(GEMMA3_CONFIG, f, indent=2)
             with open(args.model_summary, "w", encoding="utf-8") as f:
                 f.write(str(model) + "\n")
+                f.write(f"Total params: {total_params:,} | Trainable: {trainable_params:,}\n")
 
             print("[SUCCESS] Model initialized and saved.")
             print(f"[INFO] Weights: {args.model_weights}")
