@@ -110,7 +110,7 @@ implementation:
             main()
         PY
 
-        python3 -u /tmp/train_tokenizer.py "$@"
+        python3 -u /tmp/train_tokenizer.py "$0" "$@"
     args:
       - --train-corpus
       - {inputPath: train_corpus}
