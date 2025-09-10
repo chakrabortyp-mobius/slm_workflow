@@ -40,7 +40,7 @@ implementation:
                     return "sliding_attention"
                 if t in ("f", "full", "full_attention"):
                     return "full_attention"
-                raise ValueError(f"Unknown layer type token: {tok}")
+                raise ValueError("Unknown layer type token: " + tok)
 
             blocks = []
             for part in pattern.split(","):
