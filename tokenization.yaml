@@ -1,1 +1,129 @@
+name: Train Byte-Level BPE Tokenizer (Minimal)
+description: Trains a byte-level BPE tokenizer on a newline-delimited text corpus.
+
+inputs:
+  - name: train_corpus
+    type: Data
+  - name: vocab_size
+    type: Integer
+    default: "32000"
+  - name: min_frequency
+    type: Integer
+    default: "2"
+  - name: add_bos_eos
+    type: String
+    default: "true"     # "true"/"false"
+  - name: special_tokens
+    type: String
+    default: "[PAD],[UNK],[BOS],[EOS]"
+
+outputs:
+  - name: tokenizer_json
+    type: Model
+  - name: training_report
+    type: Data
+
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+        python3 -m pip install --quiet --no-cache-dir tokenizers
+
+        cat >/tmp/train_tokenizer.py <<'PY'
+        import argparse, json, os
+        from tokenizers import Tokenizer
+        from tokenizers.models import BPE
+        from tokenizers.trainers import BpeTrainer
+        from tokenizers.pre_tokenizers import ByteLevel
+        from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+
+        def iter_lines(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        yield line
+
+        def maybe_add_bos_eos(tok, add, specials):
+            if not add:
+                return
+            bos, eos = "[BOS]", "[EOS]"
+            bid, eid = tok.token_to_id(bos), tok.token_to_id(eos)
+            if bid is None or eid is None:
+                print("[WARN] BOS/EOS not in vocab; skipping post-processing.")
+                return
+            from tokenizers.processors import TemplateProcessing
+            tok.post_processor = TemplateProcessing(
+                single="[BOS] $0 [EOS]",
+                special_tokens=[("[BOS]", bid), ("[EOS]", eid)],
+            )
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--train-corpus", required=True)
+            ap.add_argument("--vocab-size", type=int, default=32000)
+            ap.add_argument("--min-frequency", type=int, default=2)
+            ap.add_argument("--special-tokens", default="[PAD],[UNK],[BOS],[EOS]")
+            ap.add_argument("--add-bos-eos", default="true")
+            ap.add_argument("--tokenizer-json", required=True)
+            ap.add_argument("--training-report", required=True)
+            a = ap.parse_args()
+
+            specials = [s.strip() for s in a.special_tokens.split(",") if s.strip()]
+            add_bos_eos = str(a.add_bos_eos).strip().lower() in ("true","1","yes","y")
+
+            tok = Tokenizer(BPE(unk_token="[UNK]"))
+            tok.pre_tokenizer = ByteLevel()
+            tok.decoder = ByteLevelDecoder()
+
+            trainer = BpeTrainer(
+                vocab_size=a.vocab_size,
+                min_frequency=a.min_frequency,
+                special_tokens=specials,
+                initial_alphabet=ByteLevel.alphabet(),
+            )
+
+            tok.train_from_iterator(iter_lines(a.train_corpus), trainer=trainer)
+            maybe_add_bos_eos(tok, add_bos_eos, specials)
+
+            os.makedirs(os.path.dirname(a.tokenizer_json) or ".", exist_ok=True)
+            tok.save(a.tokenizer_json)
+
+            report = {
+                "train_corpus": a.train_corpus,
+                "vocab_size": a.vocab_size,
+                "min_frequency": a.min_frequency,
+                "special_tokens": specials,
+                "added_bos_eos": add_bos_eos
+            }
+            os.makedirs(os.path.dirname(a.training_report) or ".", exist_ok=True)
+            with open(a.training_report, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+
+            print("[SUCCESS] Saved", a.tokenizer_json)
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        python3 -u /tmp/train_tokenizer.py "$@"
+    args:
+      - --train-corpus
+      - {inputPath: train_corpus}
+      - --vocab-size
+      - {inputValue: vocab_size}
+      - --min-frequency
+      - {inputValue: min_frequency}
+      - --special-tokens
+      - {inputValue: special_tokens}
+      - --add-bos-eos
+      - {inputValue: add_bos_eos}
+      - --tokenizer-json
+      - {outputPath: tokenizer_json}
+      - --training-report
+      - {outputPath: training_report}
 
