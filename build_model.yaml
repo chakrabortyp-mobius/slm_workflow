@@ -42,10 +42,6 @@ implementation:
         # Utilities
         # -------------------------
         def pattern_to_layers(pattern: str, n_layers: int):
-            """
-            Parse patterns like 'S*3,F*1,S*2' (or 'S*3, F*1, S*2') into a list of
-            'sliding_attention'/'full_attention' of length n_layers.
-            """
             def norm(tok: str) -> str:
                 t = tok.strip().lower()
                 if t in ("s", "sliding", "sliding_attention"):
