@@ -354,7 +354,7 @@ implementation:
             print(model)
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"Total params: {total_params:,} | Trainable: {trainable_params:,}")
+            print(f"Total params {total_params:,} | Trainable: {trainable_params:,}")
 
             os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
