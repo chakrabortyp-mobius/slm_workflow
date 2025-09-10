@@ -372,7 +372,7 @@ implementation:
             model.eval()
 
             # Print concise summary (no triple quotes)
-            print("=== Model Summary ===")
+            print("Model Summary")
             print(model)
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
