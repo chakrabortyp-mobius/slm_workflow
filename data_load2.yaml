@@ -1,5 +1,5 @@
 name: HuggingFace Dataset Text Exporter
-description: Exports a Hugging Face dataset to a newline-delimited text file with automatic text-field detection and optional metadata.
+description: Exports a Hugging Face dataset to a newline-delimited text file with automatic text-field detection and optional metadata(TS).
 inputs:
   - name: dataset
     type: String
