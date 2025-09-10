@@ -1,6 +1,5 @@
 name: Build Gemma3 Model (Init)
 description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights + config.
-
 inputs:
   - name: tokenizer_json
     type: Model
@@ -10,7 +9,6 @@ inputs:
   - name: layer_pattern
     type: String
     default: "S*3,F*1,S*2"
-
 outputs:
   - name: model_weights
     type: Model
@@ -18,32 +16,24 @@ outputs:
     type: Data
   - name: model_summary
     type: Data
-
 implementation:
   container:
     image: python:3.9
     command:
-      - bash
-      - -ec
-      - |-
-        set -o pipefail
-
-        # Install deps (CPU torch)
-        python3 -m pip install --quiet --no-cache-dir torch tokenizers
-
-        # Inline Python (no triple-quoted strings to keep Elyra/black happy)
-        python3 -u - "$@" <<'PY'
+      - python3
+      - -u
+      - -c
+      - |
+        import os
+        os.system('pip install torch tokenizers')
+        
         import argparse, json, os, sys
         import torch
         import torch.nn as nn
         import torch.nn.functional as F
         from tokenizers import Tokenizer
 
-        # -------------------------
-        # Utilities
-        # -------------------------
         def pattern_to_layers(pattern: str, n_layers: int):
-            # Accept tokens S/F with optional multiplier, e.g. "S*3,F*1,S*2"
             def norm(tok: str) -> str:
                 t = tok.strip().lower()
                 if t in ("s", "sliding", "sliding_attention"):
@@ -81,9 +71,6 @@ implementation:
                 )
             return layer_list
 
-        # -------------------------
-        # Model building blocks
-        # -------------------------
         def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
             assert head_dim % 2 == 0
             inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
@@ -318,31 +305,24 @@ implementation:
                         break
                 return input_ids
 
-        # -------------------------
-        # Main
-        # -------------------------
         def main():
             ap = argparse.ArgumentParser()
             ap.add_argument("--tokenizer-json", required=True)
             ap.add_argument("--n-layers", type=int, required=True)
-            ap.add_argument("--layer-pattern", required=True)  # e.g. S*3,F*1,S*2
+            ap.add_argument("--layer-pattern", required=True)
             ap.add_argument("--model-weights", required=True)
             ap.add_argument("--model-config", required=True)
             ap.add_argument("--model-summary", required=True)
             args = ap.parse_args()
 
-            # Load vocab size from tokenizer
             tok = Tokenizer.from_file(args.tokenizer_json)
             vocab_size = tok.get_vocab_size()
 
-            # Parse layer pattern
             layer_types = pattern_to_layers(args.layer_pattern, args.n_layers)
 
-            # Device & dtype
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model_dtype = torch.float16 if device == "cuda" else torch.float32
 
-            # Fixed config parts
             GEMMA3_CONFIG = {
                 "vocab_size": vocab_size,
                 "context_length": 2048,
@@ -363,7 +343,6 @@ implementation:
                 "rms_norm_eps": 1e-6,
             }
 
-            # Build model
             model = Gemma3Model(GEMMA3_CONFIG).to(device)
             model.cos_global = model.cos_global.to(device)
             model.sin_global = model.sin_global.to(device)
@@ -371,14 +350,12 @@ implementation:
             model.sin_local = model.sin_local.to(device)
             model.eval()
 
-            # Print concise summary (no triple quotes)
             print("Model Summary")
             print(model)
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(f"Total params: {total_params:,} | Trainable: {trainable_params:,}")
 
-            # Persist outputs
             os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
             os.makedirs(os.path.dirname(args.model_summary) or ".", exist_ok=True)
@@ -390,18 +367,10 @@ implementation:
                 f.write(str(model) + "\n")
                 f.write(f"Total params: {total_params:,} | Trainable: {trainable_params:,}\n")
 
-            print("[SUCCESS] Model initialized and saved.")
-            print(f"[INFO] Weights: {args.model_weights}")
-            print(f"[INFO] Config : {args.model_config}")
-            print(f"[INFO] Summary: {args.model_summary}")
+            print("Model initialized and saved.")
 
         if __name__ == "__main__":
-            try:
-                main()
-            except Exception as e:
-                print(f"[ERROR] {e}")
-                sys.exit(1)
-        PY
+            main()
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
