@@ -1,4 +1,4 @@
-name: Build Gemma3 Model2
+name: Build Gemma3 Model 13
 description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights + config.
 inputs:
   - name: tokenizer_json
@@ -354,18 +354,23 @@ implementation:
             print(model)
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            # print(f"Total params {total_params:,} | Trainable {trainable_params:,}")
+            #print(f"Total params {total_params:,} | Trainable {trainable_params:,}")
 
             os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
             os.makedirs(os.path.dirname(args.model_summary) or ".", exist_ok=True)
 
             torch.save(model.state_dict(), args.model_weights)
+
             with open(args.model_config, "w", encoding="utf-8") as f:
                 json.dump(GEMMA3_CONFIG, f, indent=2)
+
             with open(args.model_summary, "w", encoding="utf-8") as f:
-                f.write(str(model) + "\n")
-                f.write("Total params " + str(total_params) + " | Trainable " + str(trainable_params) + "\n")
+                f.write(str(model))
+                f.write("\n")
+                f.write(f"Total params: {total_params:,}\n")
+                f.write(f"Trainable params: {trainable_params:,}\n")
+
 
             print("Model initialized and saved.")
 
