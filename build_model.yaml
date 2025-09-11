@@ -368,9 +368,8 @@ implementation:
             with open(args.model_summary, "w", encoding="utf-8") as f:
                 f.write(str(model))
                 f.write("\n")
-                f.write(f"Total params: {total_params:,}\n")
-                f.write(f"Trainable params: {trainable_params:,}\n")
-
+                f.write("Total params = " + str(total_params) + "\n")
+                f.write("Trainable params = " + str(trainable_params) + "\n")
 
             print("Model initialized and saved.")
 
