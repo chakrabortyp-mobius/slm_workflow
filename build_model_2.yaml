@@ -1,5 +1,5 @@
 name: Build Gemma3 Model 13
-description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights + config.
+description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights.
 inputs:
   - name: tokenizer_json
     type: Model
@@ -12,10 +12,6 @@ inputs:
 outputs:
   - name: model_weights
     type: Model
-  - name: model_config
-    type: Data
-  - name: model_summary
-    type: Data
 implementation:
   container:
     image: python:3.9
@@ -26,21 +22,19 @@ implementation:
       - |
         import os
         os.system('pip install torch tokenizers')
-        
+
         import argparse, json, os, sys
         import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
         from tokenizers import Tokenizer
 
-        def pattern_to_layers(pattern, n_layers):
-            def norm(tok):
+        def pattern_to_layers(pattern: str, n_layers: int):
+            def norm(tok: str) -> str:
                 t = tok.strip().lower()
                 if t in ("s", "sliding", "sliding_attention"):
                     return "sliding_attention"
                 if t in ("f", "full", "full_attention"):
                     return "full_attention"
-                raise ValueError("Unknown layer type token")
+                raise ValueError("Unknown layer type token: " + tok)
 
             blocks = []
             for part in pattern.split(","):
@@ -50,9 +44,12 @@ implementation:
                 if "*" in part:
                     t_raw, c_raw = part.split("*", 1)
                     t = norm(t_raw)
-                    c = int(c_raw)
+                    try:
+                        c = int(c_raw)
+                    except Exception:
+                        raise ValueError(f"Invalid count in block '{part}'")
                     if c <= 0:
-                        raise ValueError("Count must be > 0")
+                        raise ValueError(f"Count must be > 0 in block '{part}'")
                 else:
                     t = norm(part)
                     c = 1
@@ -63,10 +60,12 @@ implementation:
                 layer_list.extend([t] * c)
 
             if len(layer_list) != n_layers:
-                raise ValueError("Pattern length mismatch")
+                raise ValueError(
+                    f"Pattern expands to {len(layer_list)} layers, but n_layers={n_layers}."
+                )
             return layer_list
 
-        def compute_rope_params(head_dim, theta_base=10000.0, context_length=4096, dtype=torch.float32):
+        def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
             assert head_dim % 2 == 0
             inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
             positions = torch.arange(context_length, dtype=dtype)
@@ -75,7 +74,7 @@ implementation:
             return torch.cos(angles), torch.sin(angles)
 
         def apply_rope(x, cos, sin):
-            seq_len, head_dim = x.size(-2), x.size(-1)
+            *_, seq_len, head_dim = x.size()
             x1 = x[..., :head_dim//2]
             x2 = x[..., head_dim//2:]
             cos_seq = cos[:seq_len, :].unsqueeze(0).unsqueeze(0)
@@ -136,7 +135,7 @@ implementation:
                 v = v.repeat_interleave(self.group_size, dim=1)
                 attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
                 if mask is not None:
-                    attn_scores = attn_scores.masked_fill(mask == False, float('-inf'))
+                    attn_scores = attn_scores.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
                 attn_probs = torch.softmax(attn_scores, dim=-1)
                 out = torch.matmul(attn_probs, v)
                 out = out.transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_dim)
@@ -241,7 +240,7 @@ implementation:
                     self.cos_local = self.cos_local.to(device)
                     self.sin_local = self.sin_local.to(device)
 
-            def forward(self, input_ids, labels=None):
+            def forward(self, input_ids: torch.LongTensor, labels: torch.LongTensor = None):
                 x = self.token_emb(input_ids).to(self.cfg["dtype"])
                 B, T, _ = x.size()
                 device = x.device
@@ -275,14 +274,37 @@ implementation:
                     )
                 return logits, loss
 
+            @torch.no_grad()
+            def generate(self, input_ids, max_new_tokens=50, temperature=1.0, top_k=None, eos_token_id=None):
+                self.eval()
+                device = input_ids.device
+                self._ensure_rope_on_device(device)
+
+                for _ in range(max_new_tokens):
+                    input_cond = input_ids[:, -self.cfg["context_length"]:]
+                    logits, _ = self.forward(input_cond)
+                    logits = logits[:, -1, :] / max(temperature, 1e-8)
+
+                    if top_k is not None:
+                        v, ix = torch.topk(logits, top_k)
+                        mask = torch.full_like(logits, float('-inf'))
+                        mask.scatter_(1, ix, v)
+                        logits = mask
+
+                    probs = torch.softmax(logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                    input_ids = torch.cat([input_ids, next_token], dim=1)
+
+                    if eos_token_id is not None and (next_token == eos_token_id).all():
+                        break
+                return input_ids
+
         def main():
             ap = argparse.ArgumentParser()
             ap.add_argument("--tokenizer-json", required=True)
             ap.add_argument("--n-layers", type=int, required=True)
             ap.add_argument("--layer-pattern", required=True)
             ap.add_argument("--model-weights", required=True)
-            ap.add_argument("--model-config", required=True)
-            ap.add_argument("--model-summary", required=True)
             args = ap.parse_args()
 
             tok = Tokenizer.from_file(args.tokenizer_json)
@@ -319,26 +341,7 @@ implementation:
             model.cos_local = model.cos_local.to(device)
             model.sin_local = model.sin_local.to(device)
             model.eval()
-
-            print("Model Summary")
-            print(model)
-            total_params = sum(p.numel() for p in model.parameters())
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-            os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
-            os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
-            os.makedirs(os.path.dirname(args.model_summary) or ".", exist_ok=True)
-
             torch.save(model.state_dict(), args.model_weights)
-
-            with open(args.model_config, "w") as f:
-                json.dump(GEMMA3_CONFIG, f, indent=2)
-
-            with open(args.model_summary, "w") as f:
-                f.write(str(model))
-                f.write("\n")
-                f.write("Total params: %d\n" % total_params)
-                f.write("Trainable params: %d\n" % trainable_params)
 
             print("Model initialized and saved.")
 
@@ -353,7 +356,5 @@ implementation:
       - {inputValue: layer_pattern}
       - --model-weights
       - {outputPath: model_weights}
-      - --model-config
-      - {outputPath: model_config}
-      - --model-summary
-      - {outputPath: model_summary}
+
+        
