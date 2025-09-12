@@ -1,0 +1,495 @@
+name: Train Gemma3 Causal LM
+description: Tokenizes corpus to memmaps and trains Gemma3 with AMP, warmup→cosine LR, gradient accumulation, and best/final checkpoints.
+
+inputs:
+  - name: tokenizer_json
+    type: Model
+  - name: train_corpus
+    type: Data
+  - name: model_config
+    type: Data
+  - name: model_weights
+    type: Model
+
+  # Hyperparameters (quick sanity defaults; override as needed)
+  - name: learning_rate
+    type: String
+    default: "1e-4"
+  - name: min_lr
+    type: String
+    default: "1e-5"            # must be <= learning_rate
+  - name: warmup_steps
+    type: Integer
+    default: "1000"            # in optimizer updates
+  - name: max_iters
+    type: Integer
+    default: "150000"          # micro-steps; updates ≈ max_iters / grad_accum
+  - name: batch_size
+    type: Integer
+    default: "32"
+  - name: block_size
+    type: Integer
+    default: "128"
+  - name: grad_accum
+    type: Integer
+    default: "32"
+  - name: eval_interval
+    type: Integer
+    default: "1000"            # evaluate every N optimizer updates
+  - name: eval_iters
+    type: Integer
+    default: "500"             # batches per eval split
+  - name: weight_decay
+    type: String
+    default: "0.1"
+  - name: beta2
+    type: String
+    default: "0.95"
+  - name: clip_grad_norm
+    type: String
+    default: "0.5"
+  - name: val_fraction
+    type: String
+    default: "0.1"             # fraction of train_corpus for validation
+  - name: num_proc
+    type: Integer
+    default: "8"               # tokenization workers
+
+outputs:
+  - name: best_weights
+    type: Model
+  - name: final_weights
+    type: Model
+  - name: training_report
+    type: Data
+  - name: loss_curve_csv
+    type: Data
+
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - python3
+      - -u
+      - -c
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+                        "torch>=2.2", "tokenizers", "datasets", "tqdm", "numpy"], check=True)
+
+        import os, json, math, argparse, numpy as np, torch
+        import torch.nn as nn, torch.nn.functional as F
+        from contextlib import nullcontext
+        from tokenizers import Tokenizer
+        from datasets import load_dataset
+        from tqdm import tqdm
+
+        # ---------- Model (must match builder) ----------
+        def compute_rope_params(head_dim, theta_base=10_000.0, context_length=4096, dtype=torch.float32):
+            assert head_dim % 2 == 0
+            inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype) / head_dim))
+            positions = torch.arange(context_length, dtype=dtype)
+            angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)
+            angles = torch.cat((angles, angles), dim=1)
+            return torch.cos(angles), torch.sin(angles)
+
+        def apply_rope(x, cos, sin):
+            *_, seq_len, head_dim = x.size()
+            x1, x2 = x[..., :head_dim//2], x[..., head_dim//2:]
+            cos_seq = cos[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
+            sin_seq = sin[:seq_len, :].to(x.dtype).unsqueeze(0).unsqueeze(0)
+            rotated = torch.cat((-x2, x1), dim=-1)
+            return (x * cos_seq) + (rotated * sin_seq)
+
+        class RMSNorm(nn.Module):
+            def __init__(self, emb_dim, eps=1e-6, bias=False):
+                super().__init__()
+                self.eps = eps
+                self.scale = nn.Parameter(torch.zeros(emb_dim))
+                self.shift = nn.Parameter(torch.zeros(emb_dim)) if bias else None
+            def forward(self, x):
+                orig_dtype = x.dtype
+                x_f = x.float()
+                var = x_f.pow(2).mean(dim=-1, keepdim=True)
+                x_norm = x_f * torch.rsqrt(var + self.eps)
+                out = x_norm * (1.0 + self.scale.float())
+                if self.shift is not None:
+                    out = out + self.shift.float()
+                return out.to(orig_dtype)
+
+        class GroupedQueryAttention(nn.Module):
+            def __init__(self, d_in, num_heads, num_kv_groups, head_dim=None, qk_norm=False, query_pre_attn_scalar=None, dtype=None):
+                super().__init__()
+                assert num_heads % num_kv_groups == 0
+                self.num_heads = num_heads
+                self.num_kv_groups = num_kv_groups
+                self.group_size = num_heads // num_kv_groups
+                self.head_dim = head_dim if head_dim is not None else d_in // num_heads
+                self.scaling = (query_pre_attn_scalar ** -0.5) if (query_pre_attn_scalar is not None) else (self.head_dim ** -0.5)
+                self.W_query = nn.Linear(d_in, num_heads * self.head_dim, bias=False, dtype=dtype)
+                self.W_key   = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+                self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+                self.out_proj= nn.Linear(num_heads * self.head_dim, d_in, bias=False, dtype=dtype)
+                self.q_norm = RMSNorm(self.head_dim) if qk_norm else None
+                self.k_norm = RMSNorm(self.head_dim) if qk_norm else None
+            def forward(self, x, cos, sin, mask=None):
+                B, T, _ = x.shape
+                q = self.W_query(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+                k = self.W_key(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
+                v = self.W_value(x).view(B, T, self.num_kv_groups, self.head_dim).transpose(1, 2)
+                if self.q_norm is not None: q = self.q_norm(q)
+                if self.k_norm is not None: k = self.k_norm(k)
+                q = apply_rope(q, cos, sin); k = apply_rope(k, cos, sin)
+                k = k.repeat_interleave(self.group_size, dim=1)
+                v = v.repeat_interleave(self.group_size, dim=1)
+                attn = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
+                if mask is not None:
+                    attn = attn.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+                p = torch.softmax(attn, dim=-1)
+                out = torch.matmul(p, v).transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_dim)
+                return self.out_proj(out)
+
+        class FeedForward(nn.Module):
+            def __init__(self, cfg):
+                super().__init__()
+                emb_dim, hidden_dim, dtype = cfg["emb_dim"], cfg["hidden_dim"], cfg["dtype"]
+                self.fc1 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
+                self.fc2 = nn.Linear(emb_dim, hidden_dim, bias=False, dtype=dtype)
+                self.fc3 = nn.Linear(hidden_dim, emb_dim, bias=False, dtype=dtype)
+            def forward(self, x): return self.fc3(F.gelu(self.fc1(x)) * self.fc2(x))
+
+        class TransformerBlock(nn.Module):
+            def __init__(self, cfg, layer_type):
+                super().__init__()
+                self.layer_type = layer_type
+                self.attn = GroupedQueryAttention(
+                    d_in=cfg["emb_dim"], num_heads=cfg["n_heads"], num_kv_groups=cfg.get("n_kv_groups", 1),
+                    head_dim=cfg["head_dim"], qk_norm=cfg.get("qk_norm", False),
+                    query_pre_attn_scalar=cfg.get("query_pre_attn_scalar", None), dtype=cfg["dtype"]
+                )
+                self.input_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.post_attn_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.pre_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.post_ff_norm = RMSNorm(cfg["emb_dim"], eps=cfg.get("rms_norm_eps", 1e-6))
+                self.ffn = FeedForward(cfg)
+            def forward(self, x, cos, sin, mask=None):
+                residual = x
+                x = self.input_norm(x)
+                x = self.post_attn_norm(self.attn(x, cos, sin, mask) + residual)
+                residual = x
+                x = self.pre_ff_norm(x)
+                x = self.post_ff_norm(self.ffn(x) + residual)
+                return x
+
+        class Gemma3Model(nn.Module):
+            def __init__(self, cfg):
+                super().__init__()
+                self.cfg = cfg
+                vocab_size, emb_dim = cfg["vocab_size"], cfg["emb_dim"]
+                self.token_emb = nn.Embedding(vocab_size, emb_dim, dtype=cfg["dtype"])
+                self.blocks = nn.ModuleList([TransformerBlock(cfg, layer_type=cfg["layer_types"][i]) for i in range(cfg["n_layers"])])
+                self.final_norm = RMSNorm(emb_dim, eps=cfg.get("rms_norm_eps", 1e-6))
+                self.out_head = nn.Linear(emb_dim, vocab_size, bias=False, dtype=cfg["dtype"])
+                self.cos_global, self.sin_global = compute_rope_params(cfg["head_dim"], cfg["rope_base"], cfg["context_length"], torch.float32)
+                self.cos_local,  self.sin_local  = compute_rope_params(cfg["head_dim"], cfg["rope_local_base"], cfg["sliding_window"], torch.float32)
+            def _ensure_rope_on_device(self, device):
+                if self.cos_global.device != device:
+                    self.cos_global = self.cos_global.to(device); self.sin_global = self.sin_global.to(device)
+                if self.cos_local.device != device:
+                    self.cos_local = self.cos_local.to(device); self.sin_local = self.sin_local.to(device)
+            def forward(self, input_ids: torch.LongTensor, labels: torch.LongTensor = None):
+                x = self.token_emb(input_ids).to(self.cfg["dtype"])
+                B, T, _ = x.size(); device = x.device
+                self._ensure_rope_on_device(device)
+                mask_full = torch.tril(torch.ones((T, T), dtype=torch.bool, device=device))
+                window = self.cfg["sliding_window"]
+                mask_sliding = torch.zeros((T, T), dtype=torch.bool, device=device)
+                for i in range(T):
+                    start = max(0, i - window + 1)
+                    mask_sliding[i, start:i+1] = True
+                for i, block in enumerate(self.blocks):
+                    if self.cfg["layer_types"][i] == "sliding_attention":
+                        x = block(x, self.cos_local, self.sin_local, mask_sliding)
+                    else:
+                        x = block(x, self.cos_global, self.sin_global, mask_full)
+                x = self.final_norm(x)
+                logits = self.out_head(x)
+                loss = None
+                if labels is not None:
+                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), reduction="mean")
+                return logits, loss
+
+        # ---------- Tokenization to memmaps ----------
+        def choose_bin_dtype(vocab_size):
+            if vocab_size <= (1 << 16):  return np.uint16
+            if vocab_size <= (1 << 32):  return np.uint32
+            return np.uint64
+
+        def tokenize_to_bins(tokenizer_path, train_txt, val_fraction, num_proc):
+            tok = Tokenizer.from_file(tokenizer_path)
+            vocab_size = tok.get_vocab_size()
+            BIN_DTYPE = choose_bin_dtype(vocab_size)
+
+            ds_single = load_dataset("text", data_files={"train": train_txt})
+            split = ds_single["train"].train_test_split(test_size=float(val_fraction), seed=42)
+            ds = {"train": split["train"], "val": split["test"]}
+
+            def proc(ex):
+                ids = tok.encode(ex["text"]).ids
+                return {"ids": ids, "len": len(ids)}
+
+            nproc = max(1, min(int(num_proc), (os.cpu_count() or 1)))
+            tokenized = {}
+            for sp, dset in ds.items():
+                tokenized[sp] = dset.map(proc, remove_columns=dset.column_names, desc=f"tokenizing {sp}", num_proc=nproc)
+
+            def write_split(dset, filename):
+                total = int(np.sum(dset["len"], dtype=np.uint64))
+                if total == 0: raise ValueError(f"{filename}: no tokens to write")
+                arr = np.memmap(filename, dtype=BIN_DTYPE, mode="w+", shape=(total,))
+                shard_size = max(1, len(dset) // 1024)
+                total_shards = max(1, (len(dset) + shard_size - 1) // shard_size)
+                idx = 0
+                for i in tqdm(range(total_shards), desc=f"writing {filename}"):
+                    start, stop = i * shard_size, min(len(dset), (i + 1) * shard_size)
+                    if start >= stop: continue
+                    batch = dset.select(range(start, stop)).with_format(type="numpy")
+                    ids_list = batch["ids"]
+                    if not ids_list: continue
+                    arr_batch = np.concatenate([np.asarray(x, dtype=BIN_DTYPE) for x in ids_list])
+                    arr[idx: idx + len(arr_batch)] = arr_batch
+                    idx += len(arr_batch)
+                arr.flush()
+                return total
+
+            train_tokens = write_split(tokenized["train"], "train.bin")
+            val_tokens   = write_split(tokenized["val"],   "val.bin")
+
+            meta = {"vocab_size": vocab_size, "bin_dtype": str(BIN_DTYPE.__name__),
+                    "train_tokens": int(train_tokens), "val_tokens": int(val_tokens)}
+            with open("bin_meta.json", "w", encoding="utf-8") as f: json.dump(meta, f, indent=2)
+            return BIN_DTYPE, meta
+
+        # ---------- Batch loader ----------
+        def make_get_batch(device, device_type, block_size, batch_size):
+            with open("bin_meta.json", "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            dtype_map = {"uint16": np.uint16, "uint32": np.uint32, "uint64": np.uint64}
+            BIN_DTYPE = dtype_map[meta["bin_dtype"]]
+            TRAIN_BIN, VAL_BIN = "train.bin", "val.bin"
+
+            def get_batch(split):
+                path = TRAIN_BIN if split == "train" else VAL_BIN
+                data = np.memmap(path, dtype=BIN_DTYPE, mode="r")
+                if len(data) <= block_size:
+                    raise ValueError(f"{path}: not enough tokens for block_size={block_size}")
+                ix = torch.randint(len(data) - block_size - 1, (batch_size,))
+                x = torch.stack([torch.from_numpy(np.asarray(data[i:i+block_size], dtype=np.int64)) for i in ix])
+                y = torch.stack([torch.from_numpy(np.asarray(data[i+1:i+block_size+1], dtype=np.int64)) for i in ix])
+                if device_type == "cuda":
+                    x = x.pin_memory().to(device, non_blocking=True); y = y.pin_memory().to(device, non_blocking=True)
+                else:
+                    x, y = x.to(device), y.to(device)
+                return x, y
+            return get_batch
+
+        # ---------- Eval ----------
+        def estimate_loss(model, get_batch, eval_iters, ctx):
+            out = {}
+            model.eval()
+            with torch.inference_mode():
+                for split in ["train", "val"]:
+                    losses = torch.zeros(eval_iters, device="cpu")
+                    for k in range(eval_iters):
+                        X, Y = get_batch(split)
+                        with ctx: _, loss = model(X, Y)
+                        losses[k] = loss.item()
+                    out[split] = losses.mean().item()
+            model.train()
+            return out
+
+        # ---------- Main ----------
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--tokenizer-json", required=True)
+            ap.add_argument("--train-corpus", required=True)
+            ap.add_argument("--model-config", required=True)
+            ap.add_argument("--model-weights", required=True)
+
+            ap.add_argument("--learning-rate", type=float, required=True)
+            ap.add_argument("--min-lr", type=float, required=True)
+            ap.add_argument("--warmup-steps", type=int, required=True)  # in updates
+            ap.add_argument("--max-iters", type=int, required=True)     # micro-steps
+            ap.add_argument("--batch-size", type=int, required=True)
+            ap.add_argument("--block-size", type=int, required=True)
+            ap.add_argument("--grad-accum", type=int, required=True)
+            ap.add_argument("--eval-interval", type=int, required=True) # in updates
+            ap.add_argument("--eval-iters", type=int, required=True)
+            ap.add_argument("--weight-decay", type=float, required=True)
+            ap.add_argument("--beta2", type=float, required=True)
+            ap.add_argument("--clip-grad-norm", type=float, required=True)
+            ap.add_argument("--val-fraction", type=float, required=True)
+            ap.add_argument("--num-proc", type=int, required=True)
+
+            ap.add_argument("--best-weights", required=True)
+            ap.add_argument("--final-weights", required=True)
+            ap.add_argument("--training-report", required=True)
+            ap.add_argument("--loss-curve-csv", required=True)
+            args = ap.parse_args()
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device_type = "cuda" if device == "cuda" else "cpu"
+
+            with open(args.model_config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg["dtype"] = torch.float16 if str(cfg["dtype"]) == "float16" else torch.float32
+
+            # sanity checks
+            if not (args.min_lr <= args.learning_rate):
+                raise ValueError(f"min_lr ({args.min_lr}) must be <= learning_rate ({args.learning_rate})")
+            if args.block_size > int(cfg["context_length"]):
+                raise ValueError(f"block_size ({args.block_size}) must be <= context_length ({cfg['context_length']})")
+            if "sliding_attention" in cfg.get("layer_types", []):
+                if args.block_size > int(cfg["sliding_window"]):
+                    raise ValueError(f"block_size ({args.block_size}) must be <= sliding_window ({cfg['sliding_window']}) for sliding layers")
+
+            tok = Tokenizer.from_file(args.tokenizer_json)
+            if tok.get_vocab_size() != int(cfg["vocab_size"]):
+                print(f"[WARN] tokenizer vocab {tok.get_vocab_size()} != model config vocab {cfg['vocab_size']}")
+
+            model = Gemma3Model(cfg).to(device)
+            state = torch.load(args.model_weights, map_location=device)
+            model.load_state_dict(state, strict=True)
+            model.train()
+
+            # AMP/autocast + scaler
+            ptdtype = torch.bfloat16 if (device_type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+            ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+            scaler = torch.cuda.amp.GradScaler(enabled=(device_type == "cuda" and ptdtype == torch.float16))
+
+            # Tokenize corpus to memmaps
+            _, meta = tokenize_to_bins(args.tokenizer_json, args.train_corpus, args.val_fraction, args.num_proc)
+            get_batch = make_get_batch(device, device_type, args.block_size, args.batch_size)
+
+            # Optimizer & scheduler (in UPDATES, not micro-steps)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, args.beta2),
+                                          weight_decay=args.weight_decay, eps=1e-9)
+            from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
+            total_updates = math.ceil(args.max_iters / max(1, args.grad_accum))
+            warm_updates  = min(args.warmup_steps, max(1, total_updates))
+            sched_warm = LinearLR(optimizer, total_iters=warm_updates)
+            sched_cos  = CosineAnnealingLR(optimizer, T_max=max(1, total_updates - warm_updates), eta_min=args.min_lr)
+            scheduler  = SequentialLR(optimizer, schedulers=[sched_warm, sched_cos], milestones=[warm_updates])
+
+            best_val = float("inf")
+            train_curve, val_curve, lr_curve = [], [], []
+            updates = 0
+
+            pbar = tqdm(range(args.max_iters), desc="train micro-steps")
+            for step in pbar:
+                X, Y = get_batch("train")
+                with ctx:
+                    _, loss = model(X, Y)
+                    (loss / args.grad_accum).backward()
+
+                # optimizer update boundary
+                if ((step + 1) % args.grad_accum == 0) or (step + 1 == args.max_iters):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad_norm)
+                    if scaler.is_enabled():
+                        scaler.step(optimizer); scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
+                    updates += 1
+
+                    # periodic eval (by updates)
+                    if updates % max(1, args.eval_interval) == 0:
+                        losses = estimate_loss(model, get_batch, args.eval_iters, ctx)
+                        train_curve.append(losses["train"]); val_curve.append(losses["val"]); lr_curve.append(optimizer.param_groups[0]["lr"])
+                        pbar.set_postfix(train=f"{losses['train']:.4f}", val=f"{losses['val']:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+                        if losses["val"] < best_val:
+                            best_val = losses["val"]
+                            os.makedirs(os.path.dirname(args.best_weights) or ".", exist_ok=True)
+                            torch.save(model.state_dict(), args.best_weights)
+
+            # Save final weights
+            os.makedirs(os.path.dirname(args.final_weights) or ".", exist_ok=True)
+            torch.save(model.state_dict(), args.final_weights)
+
+            # Report + loss curve
+            os.makedirs(os.path.dirname(args.training_report) or ".", exist_ok=True)
+            report = {
+                "best_val_loss": best_val,
+                "final_lr": optimizer.param_groups[0]["lr"],
+                "updates": updates,
+                "max_iters": args.max_iters,
+                "batch_size": args.batch_size,
+                "block_size": args.block_size,
+                "grad_accum": args.grad_accum,
+                "train_tokens": meta.get("train_tokens"),
+                "val_tokens": meta.get("val_tokens"),
+                "total_updates": total_updates,
+                "warmup_updates": warm_updates
+            }
+            with open(args.training_report, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+
+            import csv
+            os.makedirs(os.path.dirname(args.loss_curve_csv) or ".", exist_ok=True)
+            with open(args.loss_curve_csv, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f); w.writerow(["update","train_loss","val_loss","lr"])
+                for i,(tr,va,lr) in enumerate(zip(train_curve, val_curve, lr_curve), start=1):
+                    w.writerow([i, tr, va, lr])
+
+            print("[DONE] best:", best_val, "final saved:", args.final_weights)
+
+        if __name__ == "__main__":
+            main()
+    args:
+      - --tokenizer-json
+      - {inputPath: tokenizer_json}
+      - --train-corpus
+      - {inputPath: train_corpus}
+      - --model-config
+      - {inputPath: model_config}
+      - --model-weights
+      - {inputPath: model_weights}
+
+      - --learning-rate
+      - {inputValue: learning_rate}
+      - --min-lr
+      - {inputValue: min_lr}
+      - --warmup-steps
+      - {inputValue: warmup_steps}
+      - --max-iters
+      - {inputValue: max_iters}
+      - --batch-size
+      - {inputValue: batch_size}
+      - --block-size
+      - {inputValue: block_size}
+      - --grad-accum
+      - {inputValue: grad_accum}
+      - --eval-interval
+      - {inputValue: eval_interval}
+      - --eval-iters
+      - {inputValue: eval_iters}
+      - --weight-decay
+      - {inputValue: weight_decay}
+      - --beta2
+      - {inputValue: beta2}
+      - --clip-grad-norm
+      - {inputValue: clip_grad_norm}
+      - --val-fraction
+      - {inputValue: val_fraction}
+      - --num-proc
+      - {inputValue: num_proc}
+
+      - --best-weights
+      - {outputPath: best_weights}
+      - --final-weights
+      - {outputPath: final_weights}
+      - --training-report
+      - {outputPath: training_report}
+      - --loss-curve-csv
+      - {outputPath: loss_curve_csv}
