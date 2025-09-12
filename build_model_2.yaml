@@ -1,4 +1,4 @@
-name: Build Gemma3 Model 13
+name: Build Gemma3 Model 23
 description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights.
 inputs:
   - name: tokenizer_json
@@ -25,6 +25,8 @@ implementation:
 
         import argparse, json, os, sys
         import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
         from tokenizers import Tokenizer
 
         def pattern_to_layers(pattern: str, n_layers: int):
@@ -341,9 +343,11 @@ implementation:
             model.cos_local = model.cos_local.to(device)
             model.sin_local = model.sin_local.to(device)
             model.eval()
+            os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             torch.save(model.state_dict(), args.model_weights)
 
             print("Model initialized and saved.")
+            print(model)
 
         if __name__ == "__main__":
             main()
