@@ -1,5 +1,5 @@
-name: Build Gemma3 Model 23
-description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights.
+name: Build Gemma3 Model 25
+description: Builds an untrained Gemma3Model from tokenizer vocab and a layer pattern, prints a summary, and saves initial weights + JSON config.
 inputs:
   - name: tokenizer_json
     type: Model
@@ -12,6 +12,8 @@ inputs:
 outputs:
   - name: model_weights
     type: Model
+  - name: model_config
+    type: Data
 implementation:
   container:
     image: python:3.9
@@ -307,6 +309,7 @@ implementation:
             ap.add_argument("--n-layers", type=int, required=True)
             ap.add_argument("--layer-pattern", required=True)
             ap.add_argument("--model-weights", required=True)
+            ap.add_argument("--model-config", required=True)
             args = ap.parse_args()
 
             tok = Tokenizer.from_file(args.tokenizer_json)
@@ -337,15 +340,24 @@ implementation:
                 "rms_norm_eps": 1e-6,
             }
 
+            # Save JSON config (dtype as a string to be JSON-safe)
+            dtype_name = "float16" if model_dtype == torch.float16 else "float32"
+            cfg_to_save = {**GEMMA3_CONFIG, "dtype": dtype_name}
+            os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
+            with open(args.model_config, "w", encoding="utf-8") as f:
+                json.dump(cfg_to_save, f, indent=2)
+            print(f"[INFO] Model config saved to {args.model_config}")
+
             model = Gemma3Model(GEMMA3_CONFIG).to(device)
             model.cos_global = model.cos_global.to(device)
             model.sin_global = model.sin_global.to(device)
             model.cos_local = model.cos_local.to(device)
             model.sin_local = model.sin_local.to(device)
             model.eval()
+
             os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             torch.save(model.state_dict(), args.model_weights)
-
+            print(f"[INFO] Weights saved to {args.model_weights}")
             print("Model initialized and saved.")
             print(model)
 
@@ -360,5 +372,5 @@ implementation:
       - {inputValue: layer_pattern}
       - --model-weights
       - {outputPath: model_weights}
-
-        
+      - --model-config
+      - {outputPath: model_config}
