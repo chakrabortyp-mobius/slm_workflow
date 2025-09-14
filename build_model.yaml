@@ -24,12 +24,14 @@ implementation:
       - -u
       - -c
       - |
-        import subprocess, sys, os, json, argparse, torch
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", "torch", "tokenizers"], check=True)
-
-        import torch.nn as nn
+        import subprocess, sys
+        subprocess.run([sys.executable, "-m", "pip", "install", "torch", "tokenizers"], check=True)
+        import argparse, json, os, sys
+        import torch 
+        import torch.nn as nn 
         import torch.nn.functional as F
         from tokenizers import Tokenizer
+        
 
         def pattern_to_layers(pattern: str, n_layers: int):
             def norm(tok: str) -> str:
