@@ -1,4 +1,4 @@
-name: Train Byte-Level BPE Tokenizer (Minimal)
+name: Train Byte-Level BPE Tokenizer 1252
 description: Trains a byte-level BPE tokenizer on a newline-delimited text corpus.
 
 inputs:
@@ -22,6 +22,8 @@ outputs:
     type: Model
   - name: training_report
     type: Data
+  - name: schema_json
+    type: Data
 
 implementation:
   container:
@@ -40,6 +42,30 @@ implementation:
         from tokenizers.trainers import BpeTrainer
         from tokenizers.pre_tokenizers import ByteLevel
         from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+
+        # ---------- flat schema builder (merged inputs + effective config) ----------
+        def build_flat_schema(a, specials_parsed, add_bos_eos_resolved, actual_vocab_size=None):
+            schema = {
+                # user-provided/resolved inputs (as-key-values)
+                "train_corpus": a.train_corpus,
+                "vocab_size": a.vocab_size,          # raw input value the user set
+                "min_frequency": a.min_frequency,
+                "add_bos_eos": a.add_bos_eos,        # raw input string
+                "special_tokens": a.special_tokens,
+
+                # effective config (merged here, not nested)
+                "model_type": "BPE",
+                "pre_tokenizer": "ByteLevel",
+                "decoder": "ByteLevel",
+                "unk_token": "[UNK]",
+                "special_tokens_parsed": specials_parsed,
+                "add_bos_eos_resolved": add_bos_eos_resolved,
+                "target_vocab_size": a.vocab_size,   # renamed field for config
+            }
+            if actual_vocab_size is not None:
+                schema["actual_vocab_size"] = actual_vocab_size
+            return schema
+        # ---------------------------------------------------------------------------
 
         def iter_lines(path):
             with open(path, "r", encoding="utf-8") as f:
@@ -71,11 +97,19 @@ implementation:
             ap.add_argument("--add-bos-eos", default="true")
             ap.add_argument("--tokenizer-json", required=True)
             ap.add_argument("--training-report", required=True)
+            ap.add_argument("--schema-output", required=True)
             a = ap.parse_args()
 
             specials = [s.strip() for s in a.special_tokens.split(",") if s.strip()]
-            add_bos_eos = str(a.add_bos_eos).strip().lower() in ("true","1","yes","y")
+            add_bos_eos_flag = str(a.add_bos_eos).strip().lower() in ("true","1","yes","y")
 
+            print(f"[INFO] Training tokenizer on {a.train_corpus}")
+            print(f"[INFO] Target vocab size: {a.vocab_size}")
+            print(f"[INFO] Min frequency: {a.min_frequency}")
+            print(f"[INFO] Special tokens: {specials}")
+            print(f"[INFO] Add BOS/EOS: {add_bos_eos_flag}")
+
+            # Initialize tokenizer
             tok = Tokenizer(BPE(unk_token="[UNK]"))
             tok.pre_tokenizer = ByteLevel()
             tok.decoder = ByteLevelDecoder()
@@ -87,24 +121,50 @@ implementation:
                 initial_alphabet=ByteLevel.alphabet(),
             )
 
+            # Train
             tok.train_from_iterator(iter_lines(a.train_corpus), trainer=trainer)
-            maybe_add_bos_eos(tok, add_bos_eos, specials)
+            maybe_add_bos_eos(tok, add_bos_eos_flag, specials)
 
+            # Save tokenizer
             os.makedirs(os.path.dirname(a.tokenizer_json) or ".", exist_ok=True)
             tok.save(a.tokenizer_json)
 
+            # Report
+            actual_vocab = tok.get_vocab_size()
             report = {
                 "train_corpus": a.train_corpus,
-                "vocab_size": a.vocab_size,
+                "target_vocab_size": a.vocab_size,
+                "actual_vocab_size": actual_vocab,
                 "min_frequency": a.min_frequency,
                 "special_tokens": specials,
-                "added_bos_eos": add_bos_eos
+                "added_bos_eos": add_bos_eos_flag,
+                "tokenizer_config": {
+                    "model_type": "BPE",
+                    "pre_tokenizer": "ByteLevel",
+                    "decoder": "ByteLevel",
+                    "unk_token": "[UNK]",
+                    "has_post_processor": add_bos_eos_flag
+                }
             }
             os.makedirs(os.path.dirname(a.training_report) or ".", exist_ok=True)
             with open(a.training_report, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
 
-            print("[SUCCESS] Saved", a.tokenizer_json)
+            # Flat, merged schema JSON
+            schema_flat = build_flat_schema(
+                a,
+                specials_parsed=specials,
+                add_bos_eos_resolved=add_bos_eos_flag,
+                actual_vocab_size=actual_vocab
+            )
+            os.makedirs(os.path.dirname(a.schema_output) or ".", exist_ok=True)
+            with open(a.schema_output, "w", encoding="utf-8") as f:
+                json.dump(schema_flat, f, indent=2)
+
+            print(f"[SUCCESS] Tokenizer saved to {a.tokenizer_json}")
+            print(f"[SUCCESS] Training report saved to {a.training_report}")
+            print(f"[SUCCESS] Schema JSON saved to {a.schema_output}")
+            print(f"[INFO] Final vocab size: {actual_vocab}")
 
         if __name__ == "__main__":
             main()
@@ -126,4 +186,5 @@ implementation:
       - {outputPath: tokenizer_json}
       - --training-report
       - {outputPath: training_report}
-
+      - --schema-output
+      - {outputPath: schema_json}
