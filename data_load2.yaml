@@ -1,5 +1,5 @@
-name: HuggingFace Dataset Text Exporter
-description: Exports a Hugging Face dataset to a newline-delimited text file with automatic text-field detection and optional metadata(TS).
+name: Dataset Text Exporter1
+description: Exports a Hugging Face dataset to a newline-delimited text file with automatic text-field detection and optional metadata.
 inputs:
   - name: dataset
     type: String
@@ -20,6 +20,8 @@ outputs:
     type: Data
   - name: metadata_json
     type: Data
+  - name: schema_json
+    type: Data
 implementation:
   container:
     image: python:3.9
@@ -39,6 +41,57 @@ implementation:
             from tqdm import tqdm
         except Exception:
             tqdm = lambda x, **kwargs: x
+
+        def build_schema_json(resolved):
+            # Brick interface + this run's resolved parameters
+            return {
+                "schema_version": "1.0.0",
+                "name": "HuggingFace Dataset Text Exporter",
+                "description": "Exports a Hugging Face dataset to newline-delimited text with auto text-field detection.",
+                "interface": {
+                    "inputs": [
+                        {"name": "dataset", "type": "String", "required": True,
+                         "description": "HF dataset path like 'roneneldan/TinyStories' or local path."},
+                        {"name": "split", "type": "String", "default": "train"},
+                        {"name": "text_fields", "type": "String", "default": "text",
+                         "description": "Comma-separated field names; auto-detect used if omitted."},
+                        {"name": "max_rows", "type": "String", "default": "0",
+                         "description": "0/empty means unlimited."},
+                        {"name": "streaming", "type": "String", "default": "false"}
+                    ],
+                    "outputs": [
+                        {"name": "exported_text", "type": "Data", "mime_type": "text/plain"},
+                        {"name": "metadata_json", "type": "Data", "mime_type": "application/json"},
+                        {"name": "schema_json", "type": "Data", "mime_type": "application/json"}
+                    ],
+                    "cli_arguments": [
+                        {"flag": "--dataset", "source": "inputs.dataset"},
+                        {"flag": "--output", "target": "outputs.exported_text"},
+                        {"flag": "--split", "source": "inputs.split"},
+                        {"flag": "--text-fields", "source": "inputs.text_fields"},
+                        {"flag": "--max-rows", "source": "inputs.max_rows"},
+                        {"flag": "--metadata-output", "target": "outputs.metadata_json"},
+                        {"flag": "--schema-output", "target": "outputs.schema_json"}
+                    ]
+                },
+                "behavior": {
+                    "auto_field_detection": True,
+                    "text_join_separator": " ",
+                    "line_separator": "\\n",
+                    "streaming_supported": True,
+                    "max_rows_effective": resolved.get("max_rows_effective")
+                },
+                "validation_rules": [
+                    "dataset must be a valid HuggingFace dataset identifier or local path",
+                    "split must exist in the dataset",
+                    "text_fields must contain valid field names if specified",
+                    "max_rows must be non-negative integer (0 = unlimited)"
+                ],
+                "field_detection_priority": [
+                    "text", "content", "sentence", "document", "article", "body", "message"
+                ],
+                "resolved_run": resolved
+            }
 
         class DatasetTextExporter:
             def __init__(self):
@@ -135,21 +188,47 @@ implementation:
             p.add_argument("--max-rows", type=int)
             p.add_argument("--streaming", action="store_true")
             p.add_argument("--metadata-output")
+            p.add_argument("--schema-output")
             a = p.parse_args()
 
             text_fields = [s.strip() for s in a.text_fields.split(",")] if a.text_fields else None
             max_rows = a.max_rows if a.max_rows and a.max_rows > 0 else None
 
+            # Prepare resolved parameters for schema
+            resolved_params = {
+                "dataset": a.dataset,
+                "split": a.split,
+                "text_fields": text_fields,
+                "max_rows": a.max_rows,
+                "max_rows_effective": max_rows,
+                "streaming": a.streaming,
+                "output_file": a.output,
+                "metadata_output": a.metadata_output,
+                "schema_output": a.schema_output
+            }
+
+            # Generate and save schema JSON
+            if a.schema_output:
+                schema_data = build_schema_json(resolved_params)
+                os.makedirs(os.path.dirname(a.schema_output) or ".", exist_ok=True)
+                with open(a.schema_output, "w", encoding="utf-8") as f:
+                    json.dump(schema_data, f, indent=2)
+                print(f"[INFO] Schema JSON saved to {a.schema_output}")
+
+            # Perform the actual export
             exp = DatasetTextExporter()
             meta = exp.export_dataset(dataset_name=a.dataset, output_file=a.output,
                                       config_name=None, split_name=a.split,
                                       text_fields=text_fields, separator=" ",
                                       max_rows=max_rows, streaming=a.streaming)
+            
+            # Save metadata
             if a.metadata_output:
                 os.makedirs(os.path.dirname(a.metadata_output) or ".", exist_ok=True)
                 with open(a.metadata_output, "w", encoding="utf-8") as f:
                     json.dump(meta, f, indent=2)
                 print(f"[INFO] Metadata saved to {a.metadata_output}")
+            
             if meta.get("status") == "failed": sys.exit(1)
 
         if __name__ == "__main__":
@@ -168,3 +247,5 @@ implementation:
       # omit --streaming unless you want to expose it; leaving out for minimalism
       - --metadata-output
       - {outputPath: metadata_json}
+      - --schema-output
+      - {outputPath: schema_json}
