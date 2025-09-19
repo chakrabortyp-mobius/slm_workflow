@@ -1,0 +1,95 @@
+name: Bundle & Upload Gemma3 to MinIO 901
+description: Collects tokenizer, config, model.py, and weights from parent nodes, bundles them, and uploads to MinIO for KServe.
+inputs:
+  # Artifacts from parent nodes (wire their outputs here)
+  - {name: tokenizer_json, type: Model, description: "HuggingFace Tokenizers JSON"}
+  - {name: model_config,   type: Data,  description: "Model config JSON"}
+  - {name: model_py,       type: Data,  description: "Python file defining Gemma3Model"}
+  - {name: model_weights,  type: Model, description: "Trained weights (best/final) as PyTorch state_dict"}
+  # MinIO + placement
+  - {name: bucket,         type: String, description: "MinIO bucket name (created if not exists)"}
+  - {name: app_name,       type: String, description: "Application/model family dir (e.g., gemma3)"}
+  - {name: version,        type: String, default: "1", description: "Version subdir"}
+  # MinIO connection (override if different in your cluster)
+  - {name: endpoint_url,   type: String, default: "http://minio-service.kubeflow.svc.cluster.local:9000", description: "MinIO endpoint URL"}
+  - {name: access_key,     type: String, default: "minio", description: "MinIO access key"}
+  - {name: secret_key,     type: String, default: "QL2YJ8G5PCE13KVW19JBLUSQDHRJZF", description: "MinIO secret key"}
+
+outputs:
+  - {name: minio_path, type: String,  description: "s3://bucket/app_name/version/ (directory uploaded)"}
+  - {name: bundle_dir, type: Dataset, description: "Local copy of the serving bundle (for downstream use)"}
+
+implementation:
+  container:
+    image: ubuntu:22.04
+    command:
+      - sh
+      - -ex
+      - -c
+      - |
+          # Inputs (positional):
+          # $0 tokenizer_json (file)
+          # $1 model_config   (file)
+          # $2 model_py       (file)
+          # $3 model_weights  (file)
+          # $4 bucket         (string)
+          # $5 app_name       (string)
+          # $6 version        (string)
+          # $7 endpoint_url   (string)
+          # $8 access_key     (string)
+          # $9 secret_key     (string)
+          # $10 minio_path (output string file)
+          # $11 bundle_dir (output dataset dir)
+
+          apt-get -o Acquire::ForceIPv4=true update
+          apt-get -o Acquire::ForceIPv4=true install -y wget ca-certificates coreutils
+
+          wget https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc
+          mv mc /usr/local/bin/
+
+          # Build local bundle with canonical filenames expected by your serving code
+          BUNDLE_DIR="$(mktemp -d /tmp/gemma3_bundle.XXXXXX)"
+          mkdir -p "$BUNDLE_DIR"
+
+          # Copy and normalize names
+          cp "$0"  "$BUNDLE_DIR/tokenizer.json"
+          cp "$1"  "$BUNDLE_DIR/model_config.json"
+          cp "$2"  "$BUNDLE_DIR/gemma3_model.py"
+          cp "$3"  "$BUNDLE_DIR/best_weights.pt"
+
+          echo "[INFO] Bundle contents:"
+          ls -lah "$BUNDLE_DIR"
+
+          # MinIO setup
+          mc alias set myminio "$7" "$8" "$9"
+          # Ensure bucket exists
+          mc ls myminio/"$4" >/dev/null 2>&1 || mc mb myminio/"$4"
+
+          # Remote dest s3://bucket/app/version/
+          DEST_S3="s3://$4/$5/$6/"
+          DEST_MC="myminio/$4/$5/$6/"
+          mc mb "$DEST_MC" >/dev/null 2>&1 || true
+
+          # Upload (recursive directory copy)
+          mc cp --recursive "$BUNDLE_DIR/" "$DEST_MC"
+
+          # Write outputs
+          mkdir -p "$(dirname "$10")"
+          echo "$DEST_S3" > "$10"            # minio_path (string)
+
+          mkdir -p "$11"
+          cp -r "$BUNDLE_DIR"/. "$11"/       # bundle_dir (dataset)
+    args:
+      - {inputPath: tokenizer_json}
+      - {inputPath: model_config}
+      - {inputPath: model_py}
+      - {inputPath: model_weights}
+      - {inputValue: bucket}
+      - {inputValue: app_name}
+      - {inputValue: version}
+      - {inputValue: endpoint_url}
+      - {inputValue: access_key}
+      - {inputValue: secret_key}
+      - {outputPath: minio_path}
+      - {outputPath: bundle_dir}
