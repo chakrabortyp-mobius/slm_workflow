@@ -1,29 +1,29 @@
 name: Evaluate Gemma3 Model
 description: Evaluates a trained Gemma3 model using perplexity, BLEU, and ROUGE metrics, logs results to MLflow, and outputs final scores JSON.
+
 inputs:
-  - {name: model_py, type: Data, description: "Python file OR directory containing Gemma3 model class"}
-  - {name: model_config, type: Data, description: "JSON config file for the model"}
-  - {name: model_weights, type: Model, description: "Trained weights (.pth file)"}
-  - {name: tokenizer_json, type: Model, description: "Tokenizer JSON file"}
-  - {name: eval_data, type: Dataset, description: "Evaluation dataset (JSONL with 'prompt' and 'ground_truth')"}
-  - {name: experiment_name, type: String, default: "gemma3_eval", description: "MLflow experiment name"}
+  - {name: model_py, type: Data}
+  - {name: model_config, type: Data}
+  - {name: model_weights, type: Model}
+  - {name: tokenizer_json, type: Model}
+  - {name: eval_data, type: Dataset}
+  - {name: experiment_name, type: String, default: "gemma3_eval"}
+
 outputs:
-  - {name: metrics_json, type: String, description: "JSON string with final evaluation scores"}
-  - {name: results_csv, type: Data, description: "CSV with prompts, ground truth, and predictions"}
+  - {name: metrics_json, type: Data}
+  - {name: results_csv, type: Data}
+
 implementation:
   container:
     image: python:3.9
     command:
-      - sh
-      - -c
-      - |
-        python3 -m pip install --quiet torch pandas mlflow tokenizers nltk rouge-score || \
-        python3 -m pip install --quiet torch pandas mlflow tokenizers nltk rouge-score --user
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - |
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+        python3 -m pip install --quiet --no-cache-dir torch pandas mlflow tokenizers nltk rouge-score
+
+        cat >/tmp/eval.py <<'PY'
         import argparse, json, os, sys, math, importlib.util
         from pathlib import Path
         import torch, pandas as pd, mlflow
@@ -31,41 +31,24 @@ implementation:
         from nltk.translate.bleu_score import corpus_bleu
         from rouge_score import rouge_scorer
 
-        # --------- NEW HELPERS ---------
         def find_model_py_file(directory):
-            print(f"[DEBUG] Searching for .py file in: {directory}")
             if os.path.isfile(directory):
-                print(f"[DEBUG] Path is already a file: {directory}")
                 return directory
             if not os.path.isdir(directory):
-                raise ValueError(f"Path {directory} is neither a file nor a directory")
-            print(f"[DEBUG] Directory contents: {os.listdir(directory)}")
+                raise ValueError(f"{directory} is not a file or dir")
             py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".py")]
             if not py_files:
-                raise FileNotFoundError(f"No .py file found in directory {directory}")
-            if len(py_files) > 1:
-                print(f"[WARN] Multiple .py files found, using first one: {py_files[0]}")
-            print(f"[DEBUG] Selected .py file: {py_files[0]}")
+                raise FileNotFoundError(f"No .py file found in {directory}")
             return py_files[0]
 
         def load_model_class_from_file(py_path, class_name="Gemma3Model"):
-            if not py_path.endswith('.py'):
-                print(f"[DEBUG] File {py_path} doesn't have .py extension, creating temporary .py file")
-                temp_py_path = py_path + '.py'
-                import shutil as _sh
-                _sh.copyfile(py_path, temp_py_path)
-                py_path = temp_py_path
-                print(f"[DEBUG] Created temporary file: {py_path}")
             spec = importlib.util.spec_from_file_location("gemma3_model", py_path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Could not load spec from {py_path}")
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             if not hasattr(mod, class_name):
                 raise AttributeError(f"{py_path} does not define {class_name}")
             return getattr(mod, class_name)
 
-        # --------- TEXT GEN HELPERS ---------
         def generate_text(model, tokenizer, prompt, max_length=50):
             model.eval()
             device = next(model.parameters()).device
@@ -122,6 +105,8 @@ implementation:
             parser.add_argument("--tokenizer-json", required=True)
             parser.add_argument("--eval-data", required=True)
             parser.add_argument("--experiment_name", required=True)
+            parser.add_argument("--metrics-json", required=True)
+            parser.add_argument("--results-csv", required=True)
             args = parser.parse_args()
 
             mlflow.set_experiment(args.experiment_name)
@@ -135,20 +120,27 @@ implementation:
                 model.load_state_dict(torch.load(args.model_weights, map_location=device))
                 model.eval()
                 tokenizer = Tokenizer.from_file(args.tokenizer_json)
-                if not tokenizer.token_to_id("[EOS]"): tokenizer.add_special_tokens(["[EOS]"])
+                if not tokenizer.token_to_id("[EOS]"):
+                    tokenizer.add_special_tokens(["[EOS]"])
                 eval_df = pd.read_json(args.eval_data, lines=True)
                 perplexity = calculate_perplexity(model, tokenizer, eval_df, device)
                 bleu, preds = calculate_bleu(model, tokenizer, eval_df)
                 r1, r2, rL = calculate_rouge(model, tokenizer, eval_df)
                 metrics = {"perplexity": perplexity,"bleu_score": bleu,"rouge1_f1": r1,"rouge2_f1": r2,"rougeL_f1": rL}
                 mlflow.log_metrics(metrics)
-                pd.DataFrame({"prompt": eval_df['prompt'],"ground_truth": eval_df['ground_truth'],"prediction": preds}).to_csv("evaluation_results.csv", index=False)
-                mlflow.log_artifact("evaluation_results.csv")
-                with open("metrics.json","w") as f: json.dump(metrics,f,indent=4)
+                pd.DataFrame({
+                    "prompt": eval_df['prompt'],
+                    "ground_truth": eval_df['ground_truth'],
+                    "prediction": preds
+                }).to_csv(args.results_csv, index=False)
+                with open(args.metrics_json,"w") as f: json.dump(metrics,f,indent=4)
                 print(json.dumps(metrics, indent=4))
 
         if __name__=="__main__":
             main()
+        PY
+
+        python3 -u /tmp/eval.py "$@"
     args:
       - --model-py
       - {inputPath: model_py}
@@ -162,6 +154,7 @@ implementation:
       - {inputPath: eval_data}
       - --experiment_name
       - {inputValue: experiment_name}
-    file_outputs:
-      metrics_json: metrics.json
-      results_csv: evaluation_results.csv
+      - --metrics-json
+      - {outputPath: metrics_json}
+      - --results-csv
+      - {outputPath: results_csv}
