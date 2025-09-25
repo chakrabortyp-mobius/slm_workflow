@@ -123,9 +123,6 @@ implementation:
             return avg(r1s), avg(r2s), avg(rLs)
 
         def load_eval_data(path):
-            """
-            Tries JSONL with 'prompt' & 'ground_truth'. Falls back to plain text (one prompt per line).
-            """
             try:
                 df = pd.read_json(path, lines=True)
                 if {"prompt", "ground_truth"}.issubset(df.columns):
