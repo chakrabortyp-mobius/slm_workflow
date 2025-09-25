@@ -1,0 +1,167 @@
+name: Evaluate Gemma3 Model
+description: Evaluates a trained Gemma3 model using perplexity, BLEU, and ROUGE metrics, logs results to MLflow, and outputs final scores JSON.
+inputs:
+  - {name: model_py, type: Data, description: "Python file OR directory containing Gemma3 model class"}
+  - {name: model_config, type: Data, description: "JSON config file for the model"}
+  - {name: model_weights, type: Model, description: "Trained weights (.pth file)"}
+  - {name: tokenizer_json, type: Model, description: "Tokenizer JSON file"}
+  - {name: eval_data, type: Dataset, description: "Evaluation dataset (JSONL with 'prompt' and 'ground_truth')"}
+  - {name: experiment_name, type: String, default: "gemma3_eval", description: "MLflow experiment name"}
+outputs:
+  - {name: metrics_json, type: String, description: "JSON string with final evaluation scores"}
+  - {name: results_csv, type: Data, description: "CSV with prompts, ground truth, and predictions"}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet torch pandas mlflow tokenizers nltk rouge-score || \
+        python3 -m pip install --quiet torch pandas mlflow tokenizers nltk rouge-score --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, json, os, sys, math, importlib.util
+        from pathlib import Path
+        import torch, pandas as pd, mlflow
+        from tokenizers import Tokenizer
+        from nltk.translate.bleu_score import corpus_bleu
+        from rouge_score import rouge_scorer
+
+        # --------- NEW HELPERS ---------
+        def find_model_py_file(directory):
+            print(f"[DEBUG] Searching for .py file in: {directory}")
+            if os.path.isfile(directory):
+                print(f"[DEBUG] Path is already a file: {directory}")
+                return directory
+            if not os.path.isdir(directory):
+                raise ValueError(f"Path {directory} is neither a file nor a directory")
+            print(f"[DEBUG] Directory contents: {os.listdir(directory)}")
+            py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".py")]
+            if not py_files:
+                raise FileNotFoundError(f"No .py file found in directory {directory}")
+            if len(py_files) > 1:
+                print(f"[WARN] Multiple .py files found, using first one: {py_files[0]}")
+            print(f"[DEBUG] Selected .py file: {py_files[0]}")
+            return py_files[0]
+
+        def load_model_class_from_file(py_path, class_name="Gemma3Model"):
+            if not py_path.endswith('.py'):
+                print(f"[DEBUG] File {py_path} doesn't have .py extension, creating temporary .py file")
+                temp_py_path = py_path + '.py'
+                import shutil as _sh
+                _sh.copyfile(py_path, temp_py_path)
+                py_path = temp_py_path
+                print(f"[DEBUG] Created temporary file: {py_path}")
+            spec = importlib.util.spec_from_file_location("gemma3_model", py_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec from {py_path}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if not hasattr(mod, class_name):
+                raise AttributeError(f"{py_path} does not define {class_name}")
+            return getattr(mod, class_name)
+
+        # --------- TEXT GEN HELPERS ---------
+        def generate_text(model, tokenizer, prompt, max_length=50):
+            model.eval()
+            device = next(model.parameters()).device
+            input_ids = tokenizer.encode(prompt, add_special_tokens=True).ids
+            generated_ids = input_ids
+            with torch.no_grad():
+                for _ in range(max_length - len(input_ids)):
+                    current_input = torch.tensor([generated_ids], device=device)
+                    logits, _ = model(current_input)
+                    next_token_id = torch.argmax(logits[:, -1, :], dim=-1).item()
+                    if next_token_id == tokenizer.token_to_id("[EOS]"):
+                        break
+                    generated_ids.append(next_token_id)
+            return tokenizer.decode(generated_ids)
+
+        def calculate_perplexity(model, tokenizer, data, device):
+            total_loss, total_tokens = 0, 0
+            for _, row in data.iterrows():
+                inputs = tokenizer.encode(row['prompt'] + " " + row['ground_truth'], add_special_tokens=True).ids
+                input_tensor = torch.tensor([inputs], device=device)
+                labels = input_tensor.clone()
+                with torch.no_grad():
+                    _, loss = model(input_tensor, labels=labels)
+                if loss is not None:
+                    total_loss += loss.item() * (input_tensor.size(1) - 1)
+                    total_tokens += input_tensor.size(1) - 1
+            avg_loss = total_loss / total_tokens if total_tokens > 0 else 0
+            return math.exp(avg_loss) if avg_loss > 0 else float("inf")
+
+        def calculate_bleu(model, tokenizer, data):
+            predictions, references = [], []
+            for _, row in data.iterrows():
+                pred = generate_text(model, tokenizer, row['prompt'])
+                predictions.append(pred.split())
+                references.append([row['ground_truth'].split()])
+            return corpus_bleu(references, predictions), [" ".join(p) for p in predictions]
+
+        def calculate_rouge(model, tokenizer, data):
+            scorer = rouge_scorer.RougeScorer(['rouge1','rouge2','rougeL'], use_stemmer=True)
+            scores = {'rouge1': [], 'rouge2': [], 'rougeL': []}
+            for _, row in data.iterrows():
+                pred = generate_text(model, tokenizer, row['prompt'])
+                rs = scorer.score(row['ground_truth'], pred)
+                for k in scores: scores[k].append(rs[k].fmeasure)
+            return (sum(scores['rouge1'])/len(scores['rouge1']),
+                    sum(scores['rouge2'])/len(scores['rouge2']),
+                    sum(scores['rougeL'])/len(scores['rougeL']))
+
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--model-py", required=True)
+            parser.add_argument("--model-config", required=True)
+            parser.add_argument("--model-weights", required=True)
+            parser.add_argument("--tokenizer-json", required=True)
+            parser.add_argument("--eval-data", required=True)
+            parser.add_argument("--experiment_name", required=True)
+            args = parser.parse_args()
+
+            mlflow.set_experiment(args.experiment_name)
+            with mlflow.start_run() as run:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                with open(args.model_config) as f: config = json.load(f)
+                config['dtype'] = torch.float16 if config.get('dtype')=="float16" and device=="cuda" else torch.float32
+                model_file = find_model_py_file(args.model_py)
+                ModelClass = load_model_class_from_file(model_file, "Gemma3Model")
+                model = ModelClass(config).to(device)
+                model.load_state_dict(torch.load(args.model_weights, map_location=device))
+                model.eval()
+                tokenizer = Tokenizer.from_file(args.tokenizer_json)
+                if not tokenizer.token_to_id("[EOS]"): tokenizer.add_special_tokens(["[EOS]"])
+                eval_df = pd.read_json(args.eval_data, lines=True)
+                perplexity = calculate_perplexity(model, tokenizer, eval_df, device)
+                bleu, preds = calculate_bleu(model, tokenizer, eval_df)
+                r1, r2, rL = calculate_rouge(model, tokenizer, eval_df)
+                metrics = {"perplexity": perplexity,"bleu_score": bleu,"rouge1_f1": r1,"rouge2_f1": r2,"rougeL_f1": rL}
+                mlflow.log_metrics(metrics)
+                pd.DataFrame({"prompt": eval_df['prompt'],"ground_truth": eval_df['ground_truth'],"prediction": preds}).to_csv("evaluation_results.csv", index=False)
+                mlflow.log_artifact("evaluation_results.csv")
+                with open("metrics.json","w") as f: json.dump(metrics,f,indent=4)
+                print(json.dumps(metrics, indent=4))
+
+        if __name__=="__main__":
+            main()
+    args:
+      - --model-py
+      - {inputPath: model_py}
+      - --model-config
+      - {inputPath: model_config}
+      - --model-weights
+      - {inputPath: model_weights}
+      - --tokenizer-json
+      - {inputPath: tokenizer_json}
+      - --eval-data
+      - {inputPath: eval_data}
+      - --experiment_name
+      - {inputValue: experiment_name}
+    file_outputs:
+      metrics_json: metrics.json
+      results_csv: evaluation_results.csv
