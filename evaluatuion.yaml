@@ -23,7 +23,7 @@ inputs:
 outputs:
   - name: metrics_json
     type: Metrics
-    description: "JSON with final evaluation scores"
+    description: "KFP Metrics JSON (UI-compatible)"
   - name: results_csv
     type: Data
     description: "CSV with prompts, ground truth, and predictions"
@@ -93,7 +93,7 @@ implementation:
                 with torch.no_grad():
                     _, loss = model(input_tensor, labels=labels)
                 if loss is not None:
-                    tokens = input_tensor.size(1) - 1  # ignore first token
+                    tokens = max(0, input_tensor.size(1) - 1)
                     total_loss += loss.item() * tokens
                     total_tokens += tokens
             avg_loss = (total_loss / total_tokens) if total_tokens > 0 else 0.0
@@ -140,18 +140,18 @@ implementation:
         # ----------------- main -----------------
         def main():
             ap = argparse.ArgumentParser(description="Evaluate a trained Gemma3 model.")
-            ap.add_argument("--model-py", required=True, help="Path to model .py or a directory containing it.")
-            ap.add_argument("--model-config", required=True, help="Path to model JSON config.")
-            ap.add_argument("--model-weights", required=True, help="Path to trained weights (.pth).")
-            ap.add_argument("--tokenizer-json", required=True, help="Path to tokenizer JSON.")
-            ap.add_argument("--eval-data", required=True, help="Path to eval data (JSONL or plain text).")
+            ap.add_argument("--model-py", required=True)
+            ap.add_argument("--model-config", required=True)
+            ap.add_argument("--model-weights", required=True)
+            ap.add_argument("--tokenizer-json", required=True)
+            ap.add_argument("--eval-data", required=True)
             ap.add_argument("--experiment_name", default="gemma3_eval")
-            ap.add_argument("--metrics-json", default="metrics.json")
+            ap.add_argument("--metrics-json", default="mlpipeline-metrics.json")
             ap.add_argument("--results-csv", default="evaluation_results.csv")
             args = ap.parse_args()
 
             mlflow.set_experiment(args.experiment_name)
-            with mlflow.start_run() as run:
+            with mlflow.start_run():
                 mlflow.log_params({
                     "model_py": args.model_py,
                     "model_config": args.model_config,
@@ -182,29 +182,40 @@ implementation:
                 bleu, preds = calculate_bleu(model, tokenizer, eval_df)
                 r1, r2, rL = calculate_rouge(model, tokenizer, eval_df)
 
-                metrics = {
-                    "perplexity": perplexity,
-                    "bleu_score": bleu,
-                    "rouge1_f1": r1,
-                    "rouge2_f1": r2,
-                    "rougeL_f1": rL,
+                # Log to MLflow
+                scalar_metrics = {
+                    "perplexity": float(perplexity),
+                    "bleu_score": float(bleu),
+                    "rouge1_f1": float(r1),
+                    "rouge2_f1": float(r2),
+                    "rougeL_f1": float(rL),
                 }
-                mlflow.log_metrics(metrics)
+                mlflow.log_metrics(scalar_metrics)
 
+                # Save predictions table
                 results_df = pd.DataFrame({
                     "prompt": eval_df["prompt"],
                     "ground_truth": eval_df["ground_truth"],
                     "prediction": preds
                 })
                 results_df.to_csv(args.results_csv, index=False)
-
-                with open(args.metrics_json, "w", encoding="utf-8") as f:
-                    json.dump(metrics, f, indent=4)
-
                 mlflow.log_artifact(args.results_csv)
-                mlflow.log_artifact(args.metrics_json)
 
-                print(json.dumps(metrics, indent=4))
+                # Write KFP Metrics schema (UI-compatible)
+                kfp_metrics = {
+                    "metrics": [
+                        {"name": "perplexity", "numberValue": scalar_metrics["perplexity"], "format": "RAW"},
+                        {"name": "bleu_score", "numberValue": scalar_metrics["bleu_score"], "format": "PERCENTAGE"},
+                        {"name": "rouge1_f1", "numberValue": scalar_metrics["rouge1_f1"], "format": "PERCENTAGE"},
+                        {"name": "rouge2_f1", "numberValue": scalar_metrics["rouge2_f1"], "format": "PERCENTAGE"},
+                        {"name": "rougeL_f1", "numberValue": scalar_metrics["rougeL_f1"], "format": "PERCENTAGE"},
+                    ]
+                }
+                os.makedirs(os.path.dirname(args.metrics_json) or ".", exist_ok=True)
+                with open(args.metrics_json, "w", encoding="utf-8") as f:
+                    json.dump(kfp_metrics, f, indent=2)
+
+                print(json.dumps(scalar_metrics, indent=4))
 
         if __name__ == "__main__":
             main()
