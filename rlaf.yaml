@@ -5,7 +5,6 @@ description: >
   written next to that file automatically.
 
 inputs:
-  # Training artifacts (you provide)
   - {name: tokenizer_json, type: Model}
   - {name: train_corpus,   type: Data}
   - {name: model_config,   type: Data}
@@ -25,8 +24,8 @@ inputs:
   - {name: init_metrics,      type: Metrics}
 
 outputs:
-  - {name: rlaf_output,     type: Data,  description: "Final metrics JSON emitted by RLAF loop"}
-  - {name: retrained_model, type: Model, description: "Saved best weights (.pt/.pth)"}
+  - {name: rlaf_output,     type: Data}
+  - {name: retrained_model, type: Model}
 
 implementation:
   container:
@@ -40,12 +39,12 @@ implementation:
       - -u
       - -c
       - |
-        import os, json, time, argparse, csv, math, requests
+        import os, json, time, argparse, csv, math, requests, shutil
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
         from nesy_factory.language_model.train import GemmaTrainer
 
-        # ------------- HTTP helpers -------------
+        # ---------------- HTTP helpers ----------------
         def get_retry_session():
             retry = Retry(total=5, status_forcelist=[500,502,503,504], backoff_factor=1)
             s = requests.Session()
@@ -71,15 +70,20 @@ implementation:
                 "conditionalFilter":{"conditions":[{"field":"model_id","operator":"EQUAL","value":model_id}]},
                 "partialUpdateRequests":[{"patch":[{"operation":"REPLACE","path":f"{field}","value":value}]}]
             }
-            http.patch(url, headers=headers, data=json.dumps(payload), timeout=30).raise_for_status()
+            r = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+            r.raise_for_status()
 
         def trigger_pipeline(config, pipeline_domain, dqn_params=None):
             http = get_retry_session()
             url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
             parameters = {"param_json": json.dumps(dqn_params)} if dqn_params else {}
             payload = json.dumps({
-                "pipelineType":"ML","containerResources":{},"experimentId":config["experiment_id"],
-                "enableCaching":True,"parameters":parameters,"version":1
+                "pipelineType":"ML",
+                "containerResources":{},
+                "experimentId":config["experiment_id"],
+                "enableCaching":True,
+                "parameters":parameters,
+                "version":1
             })
             headers={"accept":"application/json","Authorization":f"Bearer {config['access_token']}",
                      "Content-Type":"application/json"}
@@ -101,16 +105,19 @@ implementation:
             while True:
                 s = get_pipeline_status(config, pipeline_domain)
                 print("[DQN] status:", s)
-                if s == "SUCCEEDED": break
-                if s in ["FAILED","ERROR"]: raise RuntimeError(f"DQN failed: {s}")
+                if s == "SUCCEEDED":
+                    break
+                if s in ["FAILED","ERROR"]:
+                    raise RuntimeError(f"DQN failed: {s}")
                 time.sleep(60)
 
-        # ------------- Metrics helpers -------------
+        # ---------------- Metrics helpers ----------------
         def load_metrics_from_report(report, curve):
             metrics = {}
             if os.path.exists(report):
                 try:
-                    with open(report,"r") as f: metrics = json.load(f)
+                    with open(report,"r") as f:
+                        metrics = json.load(f)
                 except Exception as e:
                     print("[warn] parse training_report:", e)
             if os.path.exists(curve):
@@ -120,13 +127,17 @@ implementation:
                         if rows:
                             last = rows[-1]
                             for k,v in last.items():
-                                try: metrics.setdefault(k, float(v))
-                                except: pass
+                                try:
+                                    metrics.setdefault(k, float(v))
+                                except:
+                                    pass
                 except Exception as e:
                     print("[warn] parse loss_curve.csv:", e)
             if "perplexity" not in metrics and "val_loss" in metrics:
-                try: metrics["perplexity"] = math.exp(float(metrics["val_loss"]))
-                except: pass
+                try:
+                    metrics["perplexity"] = math.exp(float(metrics["val_loss"]))
+                except:
+                    pass
             return metrics
 
         def build_dqn_params(metrics_dict):
@@ -135,18 +146,23 @@ implementation:
             dqn=[]
             for k,sign in keys:
                 if k in (metrics_dict or {}):
-                    try: float(metrics_dict[k]); dqn.append({"key":k,"sign":sign,"mul":1.0})
-                    except: pass
+                    try:
+                        float(metrics_dict[k])
+                        dqn.append({"key":k,"sign":sign,"mul":1.0})
+                    except:
+                        pass
             return dqn or [{"key":"perplexity","sign":"-"}]
 
-        # ------------- Action handling -------------
+        # ---------------- Action handling ----------------
         def coerce_action_params(action_params: dict) -> dict:
             conv = {"learning_rate":float,"min_lr":float,"warmup_steps":int,"grad_accum":int,
                     "epochs":int,"error_absolute_threshold":float}
             out={}
             for k,v in (action_params or {}).items():
-                try: out[k] = conv.get(k, lambda x:x)(v)
-                except: out[k] = v
+                try:
+                    out[k] = conv.get(k, lambda x:x)(v)
+                except:
+                    out[k] = v
             if "epochs" in out and "max_iters" not in out:
                 out["max_iters"] = out["epochs"]
             return out
@@ -157,16 +173,22 @@ implementation:
             return defaults.get(param)
 
         def pick_threshold_violation(metrics, err_thresh):
-            if err_thresh is None: return (False, None, None)
-            try: thr = float(err_thresh)
-            except: return (False, None, None)
+            if err_thresh is None:
+                return (False, None, None)
+            try:
+                thr = float(err_thresh)
+            except:
+                return (False, None, None)
             key = "perplexity" if "perplexity" in metrics else ("val_loss" if thr < 1.0 and "val_loss" in metrics else None)
             if key and key in metrics:
-                try: val = float(metrics[key]); return (val > thr, key, val)
-                except: return (False, key, None)
+                try:
+                    val = float(metrics[key])
+                    return (val > thr, key, val)
+                except:
+                    return (False, key, None)
             return (False, None, None)
 
-        # ------------- Training wrapper -------------
+        # ---------------- Training wrapper ----------------
         def train_llm_with_action(action_params, paths, defaults, out_dir):
             with open(paths["model_config"], "r") as f:
                 base_cfg = json.load(f)
@@ -217,7 +239,7 @@ implementation:
             metrics = load_metrics_from_report(training_report, loss_curve_csv)
             return metrics, err_thresh, best_weights
 
-        # ------------- Main -------------
+        # ---------------- Main ----------------
         def main():
             ap = argparse.ArgumentParser()
             # inputs
@@ -235,13 +257,16 @@ implementation:
             ap.add_argument("--pipeline_domain", required=True)
             ap.add_argument("--access_token", required=True)
 
-            # simplified outputs
-            ap.add_argument("--rlaf_output", required=True)
-            ap.add_argument("--retrained_model", required=True)
+            # outputs (defaults enable local runs; orchestrator overrides via outputPath)
+            ap.add_argument("--rlaf_output", default="./out/rlaf_output.json")
+            ap.add_argument("--retrained_model", default="./out/retrained_model.pt")
 
             # optional seed metrics
             ap.add_argument("--init_metrics")
             args = ap.parse_args()
+
+            os.makedirs(os.path.dirname(args.rlaf_output) or ".", exist_ok=True)
+            os.makedirs(os.path.dirname(args.retrained_model) or ".", exist_ok=True)
 
             with open(args.access_token,"r") as f:
                 access_token = f.read().strip()
@@ -269,7 +294,6 @@ implementation:
                 "model_py_in":    args.model_py_in,
             }
 
-            # The directory where we’ll drop all aux artifacts:
             out_dir = os.path.dirname(args.retrained_model) or "."
 
             action_id_for_next_pierce = -1
@@ -302,8 +326,7 @@ implementation:
                     "experiment_id": args.dqn_experiment_id,
                     "access_token": access_token
                 }
-                # run tuner
-                run_id = trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
+                trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
 
                 updated = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                 latest = updated["rlaf2pierce"][-1]
@@ -320,78 +343,73 @@ implementation:
                 print("[RLAF] applying action:", action.get("name"), action.get("params"))
                 metrics, err_thresh, best_path = train_llm_with_action(action.get("params", {}), paths, defaults, out_dir)
 
-                # improvement score
                 score = 0.0
                 for p in dqn_params:
-                    k = p["key"]; sign = 1 if p["sign"] == "+" else -1
+                    k = p["key"]
+                    sign = 1 if p["sign"] == "+" else -1
                     if k in metrics and k in previous_state:
-                        try: score += (float(metrics[k]) - float(previous_state[k])) * sign
-                        except: pass
+                        try:
+                            score += (float(metrics[k]) - float(previous_state[k])) * sign
+                        except:
+                            pass
 
                 viol, key_used, val_used = pick_threshold_violation(metrics, err_thresh)
                 if key_used is not None:
                     print(f"[Gate] {key_used}={val_used} vs threshold={err_thresh} → {'VIOLATE' if viol else 'OK'}")
 
-                # accept/reject
                 if score > 0 and not viol:
                     print(f"[RLAF] Improved (score={score:.4f}) → keep {best_path}")
-                    # copy/move best to retrained_model path if different
                     if os.path.abspath(best_path) != os.path.abspath(args.retrained_model):
-                        import shutil
-                        os.makedirs(os.path.dirname(args.retrained_model) or ".", exist_ok=True)
                         shutil.copy2(best_path, args.retrained_model)
                 else:
                     reason = "no improvement" if score <= 0 else "threshold violated"
                     print("[RLAF] Rejecting update:", reason)
-                    os.makedirs(os.path.dirname(args.retrained_model) or ".", exist_ok=True)
                     with open(args.retrained_model, "w") as f:
                         f.write("Model not saved due to gating.")
 
                 current_metrics = metrics
 
-            os.makedirs(os.path.dirname(args.rlaf_output) or ".", exist_ok=True)
             with open(args.rlaf_output,"w") as f:
                 json.dump({"final_metrics": current_metrics}, f, indent=2)
             print("[RLAF] finished; metrics written.")
 
         if __name__ == "__main__":
             main()
+    args:
+      # inputs (read-only)
+      - --tokenizer_json
+      - {inputPath: tokenizer_json}
+      - --train_corpus
+      - {inputPath: train_corpus}
+      - --model_config
+      - {inputPath: model_config}
+      - --model_weights
+      - {inputPath: model_weights}
+      - --model_py_in
+      - {inputPath: model_py_in}
 
-args:
-  # inputs (read-only)
-  - --tokenizer_json
-  - {inputPath: tokenizer_json}
-  - --train_corpus
-  - {inputPath: train_corpus}
-  - --model_config
-  - {inputPath: model_config}
-  - --model_weights
-  - {inputPath: model_weights}
-  - --model_py_in
-  - {inputPath: model_py_in}
+      # dqn wiring
+      - --domain
+      - {inputValue: domain}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --model_id
+      - {inputValue: model_id}
+      - --dqn_pipeline_id
+      - {inputValue: dqn_pipeline_id}
+      - --dqn_experiment_id
+      - {inputValue: dqn_experiment_id}
+      - --pipeline_domain
+      - {inputValue: pipeline_domain}
+      - --access_token
+      - {inputPath: access_token}
 
-  # dqn wiring
-  - --domain
-  - {inputValue: domain}
-  - --schema_id
-  - {inputValue: schema_id}
-  - --model_id
-  - {inputValue: model_id}
-  - --dqn_pipeline_id
-  - {inputValue: dqn_pipeline_id}
-  - --dqn_experiment_id
-  - {inputValue: dqn_experiment_id}
-  - --pipeline_domain
-  - {inputValue: pipeline_domain}
-  - --access_token
-  - {inputPath: access_token}
+      # simplified outputs (writable; orchestrator injects paths)
+      - --rlaf_output
+      - {outputPath: rlaf_output}
+      - --retrained_model
+      - {outputPath: retrained_model}
 
-  # simplified outputs
-  - --rlaf_output
-  - {outputPath: rlaf_output}
-  - --retrained_model
-  - {outputPath: retrained_model}
-
-  # optional seed metrics
-  - --init_metrics
-  - {inputPath: init_metrics}
+      # optional seed metrics
+      - --init_metrics
+      - {inputPath: init_metrics}
