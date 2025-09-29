@@ -22,7 +22,7 @@ inputs:
     description: "MLflow experiment name (optional)"
 outputs:
   - name: metrics_json
-    type: Data
+    type: Metrics
     description: "JSON with final evaluation scores"
   - name: results_csv
     type: Data
