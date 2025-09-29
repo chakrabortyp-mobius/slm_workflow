@@ -1,36 +1,32 @@
-name: DQN RLAF Loop (LLM via GemmaTrainer)
+name: DQN RLAF Loop (LLM via GemmaTrainer, simplified outputs)
 description: >
-  RLAF loop for Gemma-based LLMs. Uses DQN (via dqn_pipeline_id) to pick hyperparams,
-  retrains with GemmaTrainer on provided artifacts, reads metrics from the trainer report,
-  and keeps new weights only if metrics improve and any threshold is satisfied.
+  Uses DQN to pick hyperparams, retrains Gemma LLM, evaluates from trainer report,
+  and saves best weights to a single retrained_model output. Other artifacts are
+  written next to that file automatically.
 
 inputs:
-  # --- Training artifacts (you provide these files/paths) ---
-  - {name: tokenizer_json, type: Model, description: "Tokenizer JSON file"}
-  - {name: train_corpus,   type: Data,  description: "Training text file (one sample per line or as expected by your trainer)"}
-  - {name: model_config,   type: Data,  description: "GemmaTrainer config JSON"}
-  - {name: model_weights,  type: Model, description: "Initial checkpoint (.pt/.pth)"}
-  - {name: model_py_in,    type: Data,  description: "Python file with Gemma3Model class"}
+  # Training artifacts (you provide)
+  - {name: tokenizer_json, type: Model}
+  - {name: train_corpus,   type: Data}
+  - {name: model_config,   type: Data}
+  - {name: model_weights,  type: Model}
+  - {name: model_py_in,    type: Data}
 
-  # --- Mobius / DQN wiring ---
-  - {name: domain,              type: String}
-  - {name: schema_id,           type: String}
-  - {name: model_id,            type: String}
-  - {name: dqn_pipeline_id,     type: String}
-  - {name: dqn_experiment_id,   type: String}
-  - {name: pipeline_domain,     type: String}
-  - {name: access_token,        type: string}
+  # DQN / instance wiring
+  - {name: domain,            type: String}
+  - {name: schema_id,         type: String}
+  - {name: model_id,          type: String}
+  - {name: dqn_pipeline_id,   type: String}
+  - {name: dqn_experiment_id, type: String}
+  - {name: pipeline_domain,   type: String}
+  - {name: access_token,      type: string}
 
-  # --- Optional seed metrics from your Evaluate brick (recommended) ---
-  - {name: init_metrics,        type: Metrics, description: "JSON from Evaluate Gemma3 Model (perplexity/BLEU/ROUGE)"}
+  # Optional seed metrics (from your Evaluate brick)
+  - {name: init_metrics,      type: Metrics}
 
 outputs:
-  - {name: model_py_out,    type: Data,  description: "Copied/rewritten model file from trainer"}
-  - {name: best_weights,    type: Model, description: "Best checkpoint produced by GemmaTrainer"}
-  - {name: final_weights,   type: Model, description: "Final checkpoint produced by GemmaTrainer"}
-  - {name: training_report, type: Data,  description: "trainer training_report.json"}
-  - {name: loss_curve_csv,  type: Data,  description: "trainer loss_curve.csv"}
   - {name: rlaf_output,     type: Data,  description: "Final metrics JSON emitted by RLAF loop"}
+  - {name: retrained_model, type: Model, description: "Saved best weights (.pt/.pth)"}
 
 implementation:
   container:
@@ -47,8 +43,6 @@ implementation:
         import os, json, time, argparse, csv, math, requests
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
-
-        # Your LLM trainer
         from nesy_factory.language_model.train import GemmaTrainer
 
         # ------------- HTTP helpers -------------
@@ -112,18 +106,16 @@ implementation:
                 time.sleep(60)
 
         # ------------- Metrics helpers -------------
-        def load_metrics_from_report(training_report_path, loss_curve_csv_path):
+        def load_metrics_from_report(report, curve):
             metrics = {}
-            if os.path.exists(training_report_path):
+            if os.path.exists(report):
                 try:
-                    with open(training_report_path,"r") as f:
-                        metrics = json.load(f)
+                    with open(report,"r") as f: metrics = json.load(f)
                 except Exception as e:
                     print("[warn] parse training_report:", e)
-
-            if os.path.exists(loss_curve_csv_path):
+            if os.path.exists(curve):
                 try:
-                    with open(loss_curve_csv_path,"r") as f:
+                    with open(curve,"r") as f:
                         rows = list(csv.DictReader(f))
                         if rows:
                             last = rows[-1]
@@ -132,51 +124,29 @@ implementation:
                                 except: pass
                 except Exception as e:
                     print("[warn] parse loss_curve.csv:", e)
-
             if "perplexity" not in metrics and "val_loss" in metrics:
                 try: metrics["perplexity"] = math.exp(float(metrics["val_loss"]))
                 except: pass
             return metrics
 
         def build_dqn_params(metrics_dict):
-            # LLM defaults: minimize perplexity, maximize BLEU/ROUGE; fallback to val_loss
-            keys = [("perplexity","-"), ("bleu_score","+"), ("rouge1_f1","+"),
-                    ("rouge2_f1","+"), ("rougeL_f1","+"), ("val_loss","-")]
+            keys = [("perplexity","-"),("bleu_score","+"),("rouge1_f1","+"),
+                    ("rouge2_f1","+"),("rougeL_f1","+"),("val_loss","-")]
             dqn=[]
             for k,sign in keys:
                 if k in (metrics_dict or {}):
-                    try:
-                        float(metrics_dict[k])
-                        dqn.append({"key":k,"sign":sign,"mul":1.0})
+                    try: float(metrics_dict[k]); dqn.append({"key":k,"sign":sign,"mul":1.0})
                     except: pass
             return dqn or [{"key":"perplexity","sign":"-"}]
 
         # ------------- Action handling -------------
-        ACTION_TYPE_SPEC = {
-            "learning_rate": float,
-            "min_lr": float,
-            "warmup_steps": int,
-            "grad_accum": int,
-            "epochs": int,  # optional; maps to max_iters
-            "error_absolute_threshold": float,  # gating only
-        }
-
-        TRAINER_KEYS = {
-            "learning_rate","min_lr","warmup_steps","grad_accum",
-            "max_iters","batch_size","block_size","eval_interval",
-            "eval_iters","weight_decay","beta2","clip_grad_norm",
-            "val_fraction","num_proc"
-        }
-
         def coerce_action_params(action_params: dict) -> dict:
-            ap = action_params or {}
-            out = {}
-            for k,v in ap.items():
-                fn = ACTION_TYPE_SPEC.get(k)
-                try: out[k] = fn(v) if fn else v
-                except: 
-                    print(f"[warn] cannot coerce {k}={v}")
-                    out[k] = v
+            conv = {"learning_rate":float,"min_lr":float,"warmup_steps":int,"grad_accum":int,
+                    "epochs":int,"error_absolute_threshold":float}
+            out={}
+            for k,v in (action_params or {}).items():
+                try: out[k] = conv.get(k, lambda x:x)(v)
+                except: out[k] = v
             if "epochs" in out and "max_iters" not in out:
                 out["max_iters"] = out["epochs"]
             return out
@@ -186,64 +156,71 @@ implementation:
             if param in cfg:    return cfg[param]
             return defaults.get(param)
 
-        def pick_threshold_violation(metrics: dict, err_thresh):
+        def pick_threshold_violation(metrics, err_thresh):
             if err_thresh is None: return (False, None, None)
             try: thr = float(err_thresh)
             except: return (False, None, None)
             key = "perplexity" if "perplexity" in metrics else ("val_loss" if thr < 1.0 and "val_loss" in metrics else None)
             if key and key in metrics:
-                try:
-                    val = float(metrics[key])
-                    return (val > thr, key, val)
-                except:
-                    return (False, key, None)
+                try: val = float(metrics[key]); return (val > thr, key, val)
+                except: return (False, key, None)
             return (False, None, None)
 
         # ------------- Training wrapper -------------
-        def train_llm_with_action(action_params, paths, static_defaults):
+        def train_llm_with_action(action_params, paths, defaults, out_dir):
             with open(paths["model_config"], "r") as f:
                 base_cfg = json.load(f)
 
             coerced = coerce_action_params(action_params)
             err_thresh = coerced.get("error_absolute_threshold")
 
+            # Fixed filenames next to retrained_model
+            model_py_out     = os.path.join(out_dir, "gemma3_model.out.py")
+            best_weights     = os.path.join(out_dir, "best.pt")
+            final_weights    = os.path.join(out_dir, "final.pt")
+            training_report  = os.path.join(out_dir, "training_report.json")
+            loss_curve_csv   = os.path.join(out_dir, "loss_curve.csv")
+
+            os.makedirs(out_dir, exist_ok=True)
+
             kwargs = {
-                "learning_rate": resolve("learning_rate", coerced, base_cfg, static_defaults),
-                "min_lr":        resolve("min_lr",        coerced, base_cfg, static_defaults),
-                "warmup_steps":  resolve("warmup_steps",  coerced, base_cfg, static_defaults),
-                "grad_accum":    resolve("grad_accum",    coerced, base_cfg, static_defaults),
-                "max_iters":     resolve("max_iters",     coerced, base_cfg, static_defaults),
-                "batch_size":    resolve("batch_size",    coerced, base_cfg, static_defaults),
-                "block_size":    resolve("block_size",    coerced, base_cfg, static_defaults),
-                "eval_interval": resolve("eval_interval", coerced, base_cfg, static_defaults),
-                "eval_iters":    resolve("eval_iters",    coerced, base_cfg, static_defaults),
-                "weight_decay":  resolve("weight_decay",  coerced, base_cfg, static_defaults),
-                "beta2":         resolve("beta2",         coerced, base_cfg, static_defaults),
-                "clip_grad_norm":resolve("clip_grad_norm",coerced, base_cfg, static_defaults),
-                "val_fraction":  resolve("val_fraction",  coerced, base_cfg, static_defaults),
-                "num_proc":      resolve("num_proc",      coerced, base_cfg, static_defaults),
+                "learning_rate": resolve("learning_rate", coerced, base_cfg, defaults),
+                "min_lr":        resolve("min_lr",        coerced, base_cfg, defaults),
+                "warmup_steps":  resolve("warmup_steps",  coerced, base_cfg, defaults),
+                "grad_accum":    resolve("grad_accum",    coerced, base_cfg, defaults),
+                "max_iters":     resolve("max_iters",     coerced, base_cfg, defaults),
+                "batch_size":    resolve("batch_size",    coerced, base_cfg, defaults),
+                "block_size":    resolve("block_size",    coerced, base_cfg, defaults),
+                "eval_interval": resolve("eval_interval", coerced, base_cfg, defaults),
+                "eval_iters":    resolve("eval_iters",    coerced, base_cfg, defaults),
+                "weight_decay":  resolve("weight_decay",  coerced, base_cfg, defaults),
+                "beta2":         resolve("beta2",         coerced, base_cfg, defaults),
+                "clip_grad_norm":resolve("clip_grad_norm",coerced, base_cfg, defaults),
+                "val_fraction":  resolve("val_fraction",  coerced, base_cfg, defaults),
+                "num_proc":      resolve("num_proc",      coerced, base_cfg, defaults),
 
                 "tokenizer_json": paths["tokenizer_json"],
                 "train_corpus":   paths["train_corpus"],
                 "model_config":   paths["model_config"],
                 "model_weights":  paths["model_weights"],
                 "model_py_in":    paths["model_py_in"],
-                "model_py_out":   paths["model_py_out"],
-                "best_weights":   paths["best_weights"],
-                "final_weights":  paths["final_weights"],
-                "training_report":paths["training_report"],
-                "loss_curve_csv": paths["loss_curve_csv"],
+                "model_py_out":   model_py_out,
+                "best_weights":   best_weights,
+                "final_weights":  final_weights,
+                "training_report":training_report,
+                "loss_curve_csv": loss_curve_csv,
             }
-            kwargs = {k:v for k,v in kwargs.items() if v is not None}
+
             print("[GemmaTrainer.run kwargs]", json.dumps({k:kwargs[k] for k in sorted(kwargs)}, indent=2))
             GemmaTrainer().run(**kwargs)
 
-            metrics = load_metrics_from_report(paths["training_report"], paths["loss_curve_csv"])
-            return metrics, err_thresh
+            metrics = load_metrics_from_report(training_report, loss_curve_csv)
+            return metrics, err_thresh, best_weights
 
         # ------------- Main -------------
         def main():
             ap = argparse.ArgumentParser()
+            # inputs
             ap.add_argument("--tokenizer_json", required=True)
             ap.add_argument("--train_corpus",   required=True)
             ap.add_argument("--model_config",   required=True)
@@ -258,13 +235,11 @@ implementation:
             ap.add_argument("--pipeline_domain", required=True)
             ap.add_argument("--access_token", required=True)
 
-            ap.add_argument("--model_py_out", required=True)
-            ap.add_argument("--best_weights", required=True)
-            ap.add_argument("--final_weights", required=True)
-            ap.add_argument("--training_report", required=True)
-            ap.add_argument("--loss_curve_csv", required=True)
+            # simplified outputs
             ap.add_argument("--rlaf_output", required=True)
+            ap.add_argument("--retrained_model", required=True)
 
+            # optional seed metrics
             ap.add_argument("--init_metrics")
             args = ap.parse_args()
 
@@ -279,7 +254,7 @@ implementation:
                 except Exception as e:
                     print("[warn] parse init_metrics:", e)
 
-            static_defaults = {
+            defaults = {
                 "learning_rate": 1e-4, "min_lr": 1e-5, "warmup_steps": 1,
                 "max_iters": 6, "batch_size": 8, "block_size": 64, "grad_accum": 1,
                 "eval_interval": 1, "eval_iters": 5, "weight_decay": 0.1, "beta2": 0.95,
@@ -292,12 +267,10 @@ implementation:
                 "model_config":   args.model_config,
                 "model_weights":  args.model_weights,
                 "model_py_in":    args.model_py_in,
-                "model_py_out":   args.model_py_out,
-                "best_weights":   args.best_weights,
-                "final_weights":  args.final_weights,
-                "training_report":args.training_report,
-                "loss_curve_csv": args.loss_curve_csv,
             }
+
+            # The directory where we’ll drop all aux artifacts:
+            out_dir = os.path.dirname(args.retrained_model) or "."
 
             action_id_for_next_pierce = -1
             for _ in range(2):
@@ -329,7 +302,8 @@ implementation:
                     "experiment_id": args.dqn_experiment_id,
                     "access_token": access_token
                 }
-                trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
+                # run tuner
+                run_id = trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
 
                 updated = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                 latest = updated["rlaf2pierce"][-1]
@@ -342,10 +316,11 @@ implementation:
                 action = next((a for a in actions if a.get("id") == action_id_for_next_pierce), None)
                 if not action:
                     raise ValueError(f"Action id {action_id_for_next_pierce} not found")
+
                 print("[RLAF] applying action:", action.get("name"), action.get("params"))
+                metrics, err_thresh, best_path = train_llm_with_action(action.get("params", {}), paths, defaults, out_dir)
 
-                metrics, err_thresh = train_llm_with_action(action.get("params", {}), paths, static_defaults)
-
+                # improvement score
                 score = 0.0
                 for p in dqn_params:
                     k = p["key"]; sign = 1 if p["sign"] == "+" else -1
@@ -357,18 +332,20 @@ implementation:
                 if key_used is not None:
                     print(f"[Gate] {key_used}={val_used} vs threshold={err_thresh} → {'VIOLATE' if viol else 'OK'}")
 
+                # accept/reject
                 if score > 0 and not viol:
-                    print(f"[RLAF] Improved (score={score:.4f}) & within threshold → keep checkpoints.")
+                    print(f"[RLAF] Improved (score={score:.4f}) → keep {best_path}")
+                    # copy/move best to retrained_model path if different
+                    if os.path.abspath(best_path) != os.path.abspath(args.retrained_model):
+                        import shutil
+                        os.makedirs(os.path.dirname(args.retrained_model) or ".", exist_ok=True)
+                        shutil.copy2(best_path, args.retrained_model)
                 else:
-                    reasons=[]
-                    if score <= 0: reasons.append(f"no improvement (score={score:.4f})")
-                    if viol: reasons.append("threshold violated")
-                    print("[RLAF] Rejecting update:", ", ".join(reasons) if reasons else "unspecified")
-                    # Ensure artifacts exist even if rejected
-                    os.makedirs(os.path.dirname(args.final_weights) or ".", exist_ok=True)
-                    with open(args.final_weights, "w") as f: f.write("Model not saved due to gating.")
-                    os.makedirs(os.path.dirname(args.best_weights) or ".", exist_ok=True)
-                    with open(args.best_weights, "w") as f: f.write("Model not saved due to gating.")
+                    reason = "no improvement" if score <= 0 else "threshold violated"
+                    print("[RLAF] Rejecting update:", reason)
+                    os.makedirs(os.path.dirname(args.retrained_model) or ".", exist_ok=True)
+                    with open(args.retrained_model, "w") as f:
+                        f.write("Model not saved due to gating.")
 
                 current_metrics = metrics
 
@@ -381,7 +358,7 @@ implementation:
             main()
 
 args:
-  # training artifacts
+  # inputs (read-only)
   - --tokenizer_json
   - {inputPath: tokenizer_json}
   - --train_corpus
@@ -393,7 +370,7 @@ args:
   - --model_py_in
   - {inputPath: model_py_in}
 
-  # DQN/instance wiring
+  # dqn wiring
   - --domain
   - {inputValue: domain}
   - --schema_id
@@ -409,19 +386,11 @@ args:
   - --access_token
   - {inputPath: access_token}
 
-  # outputs
-  - --model_py_out
-  - {outputPath: model_py_out}
-  - --best_weights
-  - {outputPath: best_weights}
-  - --final_weights
-  - {outputPath: final_weights}
-  - --training_report
-  - {outputPath: training_report}
-  - --loss_curve_csv
-  - {outputPath: loss_curve_csv}
+  # simplified outputs
   - --rlaf_output
   - {outputPath: rlaf_output}
+  - --retrained_model
+  - {outputPath: retrained_model}
 
   # optional seed metrics
   - --init_metrics
