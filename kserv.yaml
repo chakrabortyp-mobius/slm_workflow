@@ -1,0 +1,127 @@
+name: Serve a model with KServe
+description: Serve Models using KServe (emits a direct inference URL)
+inputs:
+  - {name: Action,                    type: String, default: 'create',                            description: 'Action to execute on KServe'}
+  - {name: Model Name,                type: String, default: '',                                  description: 'Name to give to the deployed model'}
+  - {name: Model URI,                 type: String, default: '',                                  description: 'Path of the S3 or GCS compatible directory containing the model.'}
+  - {name: Canary Traffic Percent,    type: String, default: '100',                               description: 'The traffic split percentage between the candidate model and the last ready model'}
+  - {name: Namespace,                 type: String, default: '',                                  description: 'Kubernetes namespace where the KServe service is deployed.'}
+  - {name: Framework,                 type: String, default: 'mlserver',                          description: 'Machine Learning Framework for Model Serving.'}
+  - {name: Runtime Version,           type: String, default: 'latest',                            description: 'Runtime Version of Machine Learning Framework'}
+  - {name: Resource Requests,         type: String, default: '{"cpu": "0.5", "memory": "512Mi"}', description: 'CPU and Memory requests for Model Serving'}
+  - {name: Resource Limits,           type: String, default: '{"cpu": "1", "memory": "1Gi"}',     description: 'CPU and Memory limits for Model Serving'}
+  - {name: Custom Model Spec,         type: String, default: '{}',                                description: 'Custom model runtime container spec in JSON'}
+  - {name: Autoscaling Target,        type: String, default: '0',                                 description: 'Autoscaling Target Number'}
+  - {name: Service Account,           type: String, default: '',                                  description: 'ServiceAccount to use to run the InferenceService pod'}
+  - {name: Enable Istio Sidecar,      type: Bool,   default: 'True',                              description: 'Whether to enable istio sidecar injection'}
+  - {name: InferenceService YAML,     type: String, default: '{}',                                description: 'Raw InferenceService serialized YAML for deployment'}
+  - {name: Watch Timeout,             type: String, default: '300',                               description: "Timeout seconds for watching until InferenceService becomes ready."}
+  - {name: Min Replicas,              type: String, default: '-1',                                description: 'Minimum number of InferenceService replicas'}
+  - {name: Max Replicas,              type: String, default: '-1',                                description: 'Maximum number of InferenceService replicas'}
+  - {name: Request Timeout,           type: String, default: '60',                                description: "Specifies the number of seconds to wait before timing out a request to the component."}
+  - {name: Enable ISVC Status,        type: Bool,   default: 'True',                              description: "Specifies whether to store the inference service status as the output parameter"}
+
+outputs:
+  - {name: InferenceService Status,   type: String,                                               description: 'Status JSON output of InferenceService'}
+  - {name: Inference URL,             type: String,                                               description: 'Direct URL to POST /v2/models/<Model Name>/infer'}
+
+implementation:
+  container:
+    image: nikhilv215/kserve:kserve_component-v6
+    command:
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+
+        STATUS_OUT="$1"
+        URL_OUT="$2"
+        ACTION="$3"
+        MODEL_NAME="$4"
+        MODEL_URI="$5"
+        CANARY="$6"
+        NAMESPACE="$7"
+        FRAMEWORK="$8"
+        RUNTIME="$9"
+        REQ="${10}"
+        LIM="${11}"
+        CUSTOM="${12}"
+        AUTOSCALE="${13}"
+        SA="${14}"
+        ISTIO="${15}"
+        YAML_RAW="${16}"
+        WATCH="${17}"
+        MINR="${18}"
+        MAXR="${19}"
+        REQ_TIMEOUT="${20}"
+        ENABLE_STATUS="${21}"
+
+        # Deploy using the existing script in the image
+        python -u kservedeployer.py \
+          --action                 "${ACTION}" \
+          --model-name             "${MODEL_NAME}" \
+          --model-uri              "${MODEL_URI}" \
+          --canary-traffic-percent "${CANARY}" \
+          --namespace              "${NAMESPACE}" \
+          --framework              "${FRAMEWORK}" \
+          --runtime-version        "${RUNTIME}" \
+          --resource-requests      "${REQ}" \
+          --resource-limits        "${LIM}" \
+          --custom-model-spec      "${CUSTOM}" \
+          --autoscaling-target     "${AUTOSCALE}" \
+          --service-account        "${SA}" \
+          --enable-istio-sidecar   "${ISTIO}" \
+          --output-path            "${STATUS_OUT}" \
+          --inferenceservice-yaml  "${YAML_RAW}" \
+          --watch-timeout          "${WATCH}" \
+          --min-replicas           "${MINR}" \
+          --max-replicas           "${MAXR}" \
+          --request-timeout        "${REQ_TIMEOUT}" \
+          --enable-isvc-status     "${ENABLE_STATUS}"
+
+        # Compute a single inference URL and write it out
+        python - "$STATUS_OUT" "$MODEL_NAME" "$NAMESPACE" "$URL_OUT" <<'PY'
+        import sys, json
+        status_path, name, ns, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+        try:
+            s = json.load(open(status_path, "r", encoding="utf-8"))
+        except Exception:
+            s = {}
+
+        base = None
+        if isinstance(s, dict):
+            base = (s.get("status", {}) or {}).get("url") or (s.get("status", {}) or {}).get("address", {}).get("url")
+
+        if base:
+            base = base.rstrip("/")
+            url = f"{base}/v2/models/{name}/infer"
+        else:
+            # cluster-local fallback (good for in-cluster calls or port-forward)
+            url = f"http://{name}.{ns}.svc.cluster.local/v2/models/{name}/infer"
+
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(url)
+        print(f"[INFO] Inference URL: {url}")
+        PY
+    args:
+      - {outputPath: InferenceService Status}   # $1
+      - {outputPath: Inference URL}             # $2
+      - {inputValue: Action}                    # $3
+      - {inputValue: Model Name}                # $4
+      - {inputValue: Model URI}                 # $5  (string, not a file)
+      - {inputValue: Canary Traffic Percent}    # $6
+      - {inputValue: Namespace}                 # $7
+      - {inputValue: Framework}                 # $8
+      - {inputValue: Runtime Version}           # $9
+      - {inputValue: Resource Requests}         # $10
+      - {inputValue: Resource Limits}           # $11
+      - {inputValue: Custom Model Spec}         # $12
+      - {inputValue: Autoscaling Target}        # $13
+      - {inputValue: Service Account}           # $14
+      - {inputValue: Enable Istio Sidecar}      # $15
+      - {inputValue: InferenceService YAML}     # $16
+      - {inputValue: Watch Timeout}             # $17
+      - {inputValue: Min Replicas}              # $18
+      - {inputValue: Max Replicas}              # $19
+      - {inputValue: Request Timeout}           # $20
+      - {inputValue: Enable ISVC Status}        # $21
