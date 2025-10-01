@@ -58,130 +58,130 @@ implementation:
 
         # --- Generate MLServer runtime shim (raw-text aware) ---
         cat > "${STAGE}/runtime.py" <<'PY'
-from mlserver import MLModel
-from mlserver.types import InferenceRequest, InferenceResponse, ResponseOutput, Parameters, TensorDatatype
-import importlib.util, json, os, torch
+        from mlserver import MLModel
+        from mlserver.types import InferenceRequest, InferenceResponse, ResponseOutput, Parameters, TensorDatatype
+        import importlib.util, json, os, torch
 
-def _load_module(path, mod_name="model"):
-  spec = importlib.util.spec_from_file_location(mod_name, path)
-  if spec is None or spec.loader is None:
-    raise ImportError(f"Cannot import module from {path}")
-  m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+        def _load_module(path, mod_name="model"):
+          spec = importlib.util.spec_from_file_location(mod_name, path)
+          if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot import module from {path}")
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
-class Gemma3Runtime(MLModel):
-  async def load(self) -> bool:
-    base = os.getenv("MLSERVER_MODEL_PARAMETERS_URI", ".")
-    with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
-      self.cfg = json.load(f)
-    self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower()=="float16" else torch.float32
+        class Gemma3Runtime(MLModel):
+          async def load(self) -> bool:
+            base = os.getenv("MLSERVER_MODEL_PARAMETERS_URI", ".")
+            with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
+              self.cfg = json.load(f)
+            self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower()=="float16" else torch.float32
 
-    ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
-    self.model = ModelCls(self.cfg)
-    w_pt  = os.path.join(base, "best_weights.pt")
-    w_pth = os.path.join(base, "best_weights.pth")
-    state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
-    self.model.load_state_dict(state, strict=True)
-    self.model.eval()
+            ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
+            self.model = ModelCls(self.cfg)
+            w_pt  = os.path.join(base, "best_weights.pt")
+            w_pth = os.path.join(base, "best_weights.pth")
+            state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
+            self.model.load_state_dict(state, strict=True)
+            self.model.eval()
 
-    from tokenizers import Tokenizer
-    tok_path = os.path.join(base, "tokenizer.json")
-    if not os.path.exists(tok_path):
-      raise FileNotFoundError("tokenizer.json is required for raw-text inference")
-    self.tokenizer = Tokenizer.from_file(tok_path)
+            from tokenizers import Tokenizer
+            tok_path = os.path.join(base, "tokenizer.json")
+            if not os.path.exists(tok_path):
+              raise FileNotFoundError("tokenizer.json is required for raw-text inference")
+            self.tokenizer = Tokenizer.from_file(tok_path)
 
-    self.device = "cuda" if torch.cuda.is_available() else "cpu"
-    self.model.to(self.device)
-    self.ctx_len = int(self.cfg.get("context_length", 2048))
-    return True
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model.to(self.device)
+            self.ctx_len = int(self.cfg.get("context_length", 2048))
+            return True
 
-  def _encode_batch(self, texts):
-    ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
-    # truncate to context_length (keep tail)
-    ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
-    # pad to max len
-    maxlen = max(len(x) for x in ids_list)
-    pad_id = self.tokenizer.token_to_id("[PAD]") or 0
-    padded = [x + [pad_id]*(maxlen-len(x)) for x in ids_list]
-    return torch.tensor(padded, dtype=torch.long, device=self.device)
+          def _encode_batch(self, texts):
+            ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
+            # truncate to context_length (keep tail)
+            ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
+            # pad to max len
+            maxlen = max(len(x) for x in ids_list)
+            pad_id = self.tokenizer.token_to_id("[PAD]") or 0
+            padded = [x + [pad_id]*(maxlen-len(x)) for x in ids_list]
+            return torch.tensor(padded, dtype=torch.long, device=self.device)
 
-  def _decode_id(self, tid):
-    try: return self.tokenizer.decode([int(tid)])
-    except Exception: return ""
+          def _decode_id(self, tid):
+            try: return self.tokenizer.decode([int(tid)])
+            except Exception: return ""
 
-  async def predict(self, request: InferenceRequest) -> InferenceResponse:
-    # 1) Prefer raw text via V2 input "text"/"texts" else parameters.extra
-    texts = None
-    if request and request.inputs:
-      for inp in request.inputs:
-        if inp.name in ("text","texts"):
-          val = inp.data
-          if isinstance(val, list):
-            texts = [v.decode("utf-8") if isinstance(v, (bytes,bytearray)) else str(v) for v in val]
-          elif isinstance(val, (bytes, bytearray, str)):
-            texts = [val.decode("utf-8") if isinstance(val,(bytes,bytearray)) else str(val)]
-          break
-    if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
-      extra = request.parameters.extra
-      if "texts" in extra: texts = [str(x) for x in extra["texts"]]
-      elif "text" in extra: texts = [str(extra["text"])]
+          async def predict(self, request: InferenceRequest) -> InferenceResponse:
+            # 1) Prefer raw text via V2 input "text"/"texts" else parameters.extra
+            texts = None
+            if request and request.inputs:
+              for inp in request.inputs:
+                if inp.name in ("text","texts"):
+                  val = inp.data
+                  if isinstance(val, list):
+                    texts = [v.decode("utf-8") if isinstance(v, (bytes,bytearray)) else str(v) for v in val]
+                  elif isinstance(val, (bytes, bytearray, str)):
+                    texts = [val.decode("utf-8") if isinstance(val,(bytes,bytearray)) else str(val)]
+                  break
+            if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
+              extra = request.parameters.extra
+              if "texts" in extra: texts = [str(x) for x in extra["texts"]]
+              elif "text" in extra: texts = [str(extra["text"])]
 
-    if texts is not None:
-      input_ids = self._encode_batch(texts)
-    else:
-      # 2) Fallback: pre-tokenized IDs
-      ids = None
-      if request and request.inputs:
-        for inp in request.inputs:
-          if inp.name in ("input_ids","inputs","input_0"): ids = inp.data; break
-      if ids is None:
-        raise ValueError("Provide raw `text`/`texts` or pre-tokenized `input_ids`")
-      if isinstance(ids, list) and ids and isinstance(ids[0], int):
-        ids = [ids]
-      input_ids = torch.tensor(ids, dtype=torch.long, device=self.device)
+            if texts is not None:
+              input_ids = self._encode_batch(texts)
+            else:
+              # 2) Fallback: pre-tokenized IDs
+              ids = None
+              if request and request.inputs:
+                for inp in request.inputs:
+                  if inp.name in ("input_ids","inputs","input_0"): ids = inp.data; break
+              if ids is None:
+                raise ValueError("Provide raw `text`/`texts` or pre-tokenized `input_ids`")
+              if isinstance(ids, list) and ids and isinstance(ids[0], int):
+                ids = [ids]
+              input_ids = torch.tensor(ids, dtype=torch.long, device=self.device)
 
-    with torch.inference_mode():
-      logits, _ = self.model(input_ids)
-      last = logits[:, -1, :]  # [B, vocab]
-      next_ids = last.argmax(dim=-1).tolist()
-      next_tokens = [self._decode_id(t) for t in next_ids]
-      last_list = last.float().cpu().tolist()
+            with torch.inference_mode():
+              logits, _ = self.model(input_ids)
+              last = logits[:, -1, :]  # [B, vocab]
+              next_ids = last.argmax(dim=-1).tolist()
+              next_tokens = [self._decode_id(t) for t in next_ids]
+              last_list = last.float().cpu().tolist()
 
-    return InferenceResponse(
-      model_name=self.name,
-      outputs=[
-        ResponseOutput(
-          name="last_logits",
-          shape=[len(last_list), len(last_list[0])],
-          datatype=TensorDatatype.FP32,
-          data=last_list,
-          parameters=Parameters()
-        ),
-        ResponseOutput(
-          name="next_token_id",
-          shape=[len(next_ids)],
-          datatype=TensorDatatype.INT64,
-          data=next_ids,
-          parameters=Parameters()
-        ),
-        ResponseOutput(
-          name="next_token",
-          shape=[len(next_tokens)],
-          datatype=TensorDatatype.BYTES,
-          data=next_tokens,
-          parameters=Parameters()
-        )
-      ]
-    )
-PY
+            return InferenceResponse(
+              model_name=self.name,
+              outputs=[
+                ResponseOutput(
+                  name="last_logits",
+                  shape=[len(last_list), len(last_list[0])],
+                  datatype=TensorDatatype.FP32,
+                  data=last_list,
+                  parameters=Parameters()
+                ),
+                ResponseOutput(
+                  name="next_token_id",
+                  shape=[len(next_ids)],
+                  datatype=TensorDatatype.INT64,
+                  data=next_ids,
+                  parameters=Parameters()
+                ),
+                ResponseOutput(
+                  name="next_token",
+                  shape=[len(next_tokens)],
+                  datatype=TensorDatatype.BYTES,
+                  data=next_tokens,
+                  parameters=Parameters()
+                )
+              ]
+            )
+        PY
 
-        # --- model-settings.json (MLServer descriptor) ---
+                # --- model-settings.json (MLServer descriptor) ---
         cat > "${STAGE}/model-settings.json" <<JSON
-{
-  "name": "${NAME}",
-  "implementation": "runtime.Gemma3Runtime",
-  "parameters": { "uri": "." }
-}
-JSON
+        {
+          "name": "${NAME}",
+          "implementation": "runtime.Gemma3Runtime",
+          "parameters": { "uri": "." }
+        }
+        JSON
 
         # --- Manifest (sizes + sha256 if available) ---
         {
