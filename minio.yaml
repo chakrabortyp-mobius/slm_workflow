@@ -1,62 +1,59 @@
-name: probir_MinIO1
-description: Packages model_py + config + best_weights + tokenizer into an MLServer-ready folder (with runtime.py + model-settings.json), uploads to MinIO, and outputs the s3:// Model URI.
-
+name: Package & Upload Gemma3 to MinIO (hardcoded)
+description: Stages Gemma3 artifacts + MLServer runtime files and uploads to MinIO. Outputs a single s3:// URI for KServe.
 inputs:
-  # Artifacts (required)
-  - {name: learned_weights, type: Model, description: "Trained weights (.pt/.pth) to serve"}
-  - {name: model_py,        type: Data,  description: "Python file defining Gemma3Model"}
-  - {name: model_config,    type: Data,  description: "JSON config used by the model"}
-  - {name: tokenizer_json,  type: Model, description: "Tokenizer JSON used at training (required for raw-text inference)"}
+  - {name: learned_weights, type: Model, description: "Trained weights (.pth or .pt)"}
+  - {name: model_py,        type: Data,  description: "Model implementation Python file"}
+  - {name: model_config,    type: Data,  description: "Model config JSON"}
+  - {name: tokenizer_json,  type: Model, description: "Tokenizer JSON used in training (required for raw text)"}
 
-  # Packaging / destination
-  - {name: bucket,       type: String, default: "", description: "Target MinIO bucket"}
-  - {name: app_name,     type: String, default: "", description: "Application grouping (folder prefix)"}
-  - {name: model_name,   type: String, default: "", description: "Model name (also used in model-settings.json:name)"}
-  - {name: version,      type: String, default: "", description: "Version/run-id (empty -> auto UTC timestamp)"}
-
-  # MinIO access
-  - {name: s3_endpoint,  type: String, default: "http://minio-service.kubeflow.svc.cluster.local:9000", description: "MinIO S3 endpoint (http/https)"}
+  - {name: bucket,      type: String, description: "MinIO bucket"}
+  - {name: app_name,    type: String, description: "Application namespace under bucket"}
+  - {name: model_name,  type: String, description: "Model name (directory under app_name)"}
+  - {name: version,     type: String, default: "", description: "Optional version; if empty current UTC timestamp is used"}
 
 outputs:
-  - {name: model_uri,     type: string, description: "s3://bucket/app/model/version/ (directory URI)"}
-  - {name: manifest_json, type: Data,   description: "Uploaded file manifest (sizes + sha256)"}
+  - {name: model_uri,      type: String, description: "s3://<bucket>/<app>/<model>/<version>/"}
+  - {name: manifest_json,  type: Data,   description: "JSON manifest of uploaded files"}
 
 implementation:
   container:
     image: minio/mc:latest
-    command:
-      - sh
-      - -eu
-      - -c
+    command: ['sh', '-eu', '-c']
+    args:
       - |
-        # Positional args from "args:" (below)
+        # ---- Positional args from KFP "args" (below) ----
         WEIGHTS="$1"; MODEL_PY="$2"; CONFIG_JSON="$3"; TOKENIZER="$4"
-        BUCKET="$5"; APP="$6"; NAME="$7"; VERSION="$8"; ENDPOINT="$9"
-        OUT_URI="${10}"; OUT_MANIFEST="${11}"
+        BUCKET="$5"; APP="$6"; NAME="$7"; VERSION="$8"
+        OUT_URI="$9"; OUT_MANIFEST="${10}"
+
+        # ---- Hard-coded MinIO endpoint & credentials (as requested) ----
+        S3_ENDPOINT="http://minio-service.kubeflow.svc.cluster.local:9000"
+        S3_ACCESS="minio"
+        S3_SECRET="QL2YJ8G5PCE13KVW19JBLUSQDHRJZF"
+
+        # ---- Validate inputs ----
+        [ -n "${BUCKET}" ] || { echo "bucket is required" >&2; exit 1; }
+        [ -n "${APP}"    ] || { echo "app_name is required" >&2; exit 1; }
+        [ -n "${NAME}"   ] || { echo "model_name is required" >&2; exit 1; }
+        [ -s "${MODEL_PY}"    ] || { echo "model_py missing/empty" >&2; exit 1; }
+        [ -s "${CONFIG_JSON}" ] || { echo "model_config missing/empty" >&2; exit 1; }
+        [ -s "${TOKENIZER}"   ] || { echo "tokenizer_json missing/empty" >&2; exit 1; }
+        [ -s "${WEIGHTS}"     ] || { echo "learned_weights missing/empty" >&2; exit 1; }
+
+        # Auto-version if empty (UTC timestamp)
+        if [ -z "${VERSION}" ]; then VERSION="$(date -u +'%Y%m%dT%H%M%SZ')"; fi
 
         STAGE="/tmp/mlserver_pkg"
         mkdir -p "${STAGE}"
 
-        # --- Validate requireds ---
-        [ -n "${NAME}" ] || { echo "model_name is required" >&2; exit 1; }
-        [ -n "${BUCKET}" ] || { echo "bucket is required" >&2; exit 1; }
-        [ -n "${APP}" ] || { echo "app_name is required" >&2; exit 1; }
-        [ -s "${MODEL_PY}" ] || { echo "model_py missing/empty" >&2; exit 1; }
-        [ -s "${CONFIG_JSON}" ] || { echo "model_config missing/empty" >&2; exit 1; }
-        [ -s "${TOKENIZER}" ] || { echo "tokenizer_json missing/empty (required for raw-text inference)" >&2; exit 1; }
-        [ -s "${WEIGHTS}" ] || { echo "learned_weights missing/empty" >&2; exit 1; }
-
-        # Auto version if empty
-        if [ -z "${VERSION}" ]; then VERSION="$(date -u +'%Y%m%dT%H%M%SZ')"; fi
-
-        # --- Stage artifacts ---
-        cp "${MODEL_PY}"     "${STAGE}/model.py"
-        cp "${CONFIG_JSON}"  "${STAGE}/config.json"
-        cp "${TOKENIZER}"    "${STAGE}/tokenizer.json"
-        # Support .pth/.pt from training brick
+        # ---- Stage artifacts with expected names ----
+        cp "${MODEL_PY}"    "${STAGE}/model.py"
+        cp "${CONFIG_JSON}" "${STAGE}/config.json"
+        cp "${TOKENIZER}"   "${STAGE}/tokenizer.json"
+        # Support either .pth or .pt as input
         if cp "${WEIGHTS}" "${STAGE}/best_weights.pth" 2>/dev/null; then :; else cp "${WEIGHTS}" "${STAGE}/best_weights.pt"; fi
 
-        # --- Generate MLServer runtime shim (raw-text aware) ---
+        # ---- Generate MLServer runtime shim (raw-text aware) ----
         cat > "${STAGE}/runtime.py" <<'PY'
         from mlserver import MLModel
         from mlserver.types import InferenceRequest, InferenceResponse, ResponseOutput, Parameters, TensorDatatype
@@ -77,6 +74,7 @@ implementation:
 
             ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
             self.model = ModelCls(self.cfg)
+
             w_pt  = os.path.join(base, "best_weights.pt")
             w_pth = os.path.join(base, "best_weights.pth")
             state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
@@ -96,9 +94,7 @@ implementation:
 
           def _encode_batch(self, texts):
             ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
-            # truncate to context_length (keep tail)
             ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
-            # pad to max len
             maxlen = max(len(x) for x in ids_list)
             pad_id = self.tokenizer.token_to_id("[PAD]") or 0
             padded = [x + [pad_id]*(maxlen-len(x)) for x in ids_list]
@@ -109,15 +105,14 @@ implementation:
             except Exception: return ""
 
           async def predict(self, request: InferenceRequest) -> InferenceResponse:
-            # 1) Prefer raw text via V2 input "text"/"texts" else parameters.extra
             texts = None
             if request and request.inputs:
               for inp in request.inputs:
                 if inp.name in ("text","texts"):
                   val = inp.data
                   if isinstance(val, list):
-                    texts = [v.decode("utf-8") if isinstance(v, (bytes,bytearray)) else str(v) for v in val]
-                  elif isinstance(val, (bytes, bytearray, str)):
+                    texts = [v.decode("utf-8") if isinstance(v,(bytes,bytearray)) else str(v) for v in val]
+                  elif isinstance(val,(bytes,bytearray,str)):
                     texts = [val.decode("utf-8") if isinstance(val,(bytes,bytearray)) else str(val)]
                   break
             if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
@@ -128,7 +123,6 @@ implementation:
             if texts is not None:
               input_ids = self._encode_batch(texts)
             else:
-              # 2) Fallback: pre-tokenized IDs
               ids = None
               if request and request.inputs:
                 for inp in request.inputs:
@@ -141,7 +135,7 @@ implementation:
 
             with torch.inference_mode():
               logits, _ = self.model(input_ids)
-              last = logits[:, -1, :]  # [B, vocab]
+              last = logits[:, -1, :]
               next_ids = last.argmax(dim=-1).tolist()
               next_tokens = [self._decode_id(t) for t in next_ids]
               last_list = last.float().cpu().tolist()
@@ -174,7 +168,7 @@ implementation:
             )
         PY
 
-                # --- model-settings.json (MLServer descriptor) ---
+        # ---- MLServer descriptor ----
         cat > "${STAGE}/model-settings.json" <<JSON
         {
           "name": "${NAME}",
@@ -183,43 +177,28 @@ implementation:
         }
         JSON
 
-        # --- Manifest (sizes + sha256 if available) ---
+        # ---- Manifest (name + size only) ----
         {
           echo '{ "files": ['
           first=1
           for f in model.py runtime.py model-settings.json config.json best_weights.pth best_weights.pt tokenizer.json; do
             [ -f "${STAGE}/$f" ] || continue
-            # size
-            if stat -c%s / >/dev/null 2>&1; then
-              sz=$(stat -c%s "${STAGE}/$f")
-            else
-              sz=$(stat -f%z "${STAGE}/$f" 2>/dev/null || echo 0)
-            fi
-            # sha256 (optional)
-            if command -v sha256sum >/dev/null 2>&1; then
-              sum=$(sha256sum "${STAGE}/$f" | awk '{print $1}')
-            elif command -v shasum >/dev/null 2>&1; then
-              sum=$(shasum -a 256 "${STAGE}/$f" | awk '{print $1}')
-            else
-              sum=""
-            fi
+            sz=$(wc -c < "${STAGE}/$f" | tr -d ' ')
             [ $first -eq 0 ] && echo ','
-            printf '  { "name":"%s", "size":%s, "sha256":"%s" }' "$f" "$sz" "$sum"
+            printf '  { "name":"%s", "size":%s }' "$f" "$sz"
             first=0
           done
           echo '] }'
         } > "${OUT_MANIFEST}"
 
-        # --- Upload to MinIO ---
-        mc alias set myminio "${ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
+        # ---- Upload to MinIO (hard-coded creds) ----
+        mc alias set myminio "${S3_ENDPOINT}" "${S3_ACCESS}" "${S3_SECRET}"
         mc mb --ignore-existing "myminio/${BUCKET}"
-
         DEST="myminio/${BUCKET}/${APP}/${NAME}/${VERSION}/"
         mc cp --recursive "${STAGE}/" "${DEST}"
 
-        # Output s3-style directory URI
+        # ---- Output s3:// URI (for KServe Model URI) ----
         printf 's3://%s/%s/%s/%s/\n' "${BUCKET}" "${APP}" "${NAME}" "${VERSION}" > "${OUT_URI}"
-    args:
       - {inputPath: learned_weights}
       - {inputPath: model_py}
       - {inputPath: model_config}
@@ -228,11 +207,5 @@ implementation:
       - {inputValue: app_name}
       - {inputValue: model_name}
       - {inputValue: version}
-      - {inputValue: s3_endpoint}
       - {outputPath: model_uri}
       - {outputPath: manifest_json}
-    env:
-      - name: MINIO_ACCESS_KEY
-        valueFrom: {secretKeyRef: {name: minio-creds, key: accesskey}}
-      - name: MINIO_SECRET_KEY
-        valueFrom: {secretKeyRef: {name: minio-creds, key: secretkey}}
