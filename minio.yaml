@@ -1,4 +1,4 @@
-name: probir_MinIO
+name: probir_MinIO1
 description: Packages model_py + config + best_weights + tokenizer into an MLServer-ready folder (with runtime.py + model-settings.json), uploads to MinIO, and outputs the s3:// Model URI.
 
 inputs:
