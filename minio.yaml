@@ -18,7 +18,7 @@ inputs:
   - {name: s3_endpoint,  type: String, default: "http://minio-service.kubeflow.svc.cluster.local:9000", description: "MinIO S3 endpoint (http/https)"}
 
 outputs:
-  - {name: model_uri,     type: String, description: "s3://bucket/app/model/version/ (directory URI)"}
+  - {name: model_uri,     type: string, description: "s3://bucket/app/model/version/ (directory URI)"}
   - {name: manifest_json, type: Data,   description: "Uploaded file manifest (sizes + sha256)"}
 
 implementation:
