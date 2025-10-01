@@ -5,16 +5,13 @@ inputs:
   - {name: model_py,        type: Data,  description: "Model implementation Python file"}
   - {name: model_config,    type: Data,  description: "Model config JSON"}
   - {name: tokenizer_json,  type: Model, description: "Tokenizer JSON used in training (required for raw text)"}
-
-  - {name: bucket,      type: String, description: "MinIO bucket"}
-  - {name: app_name,    type: String, description: "Application namespace under bucket"}
-  - {name: model_name,  type: String, description: "Model name (directory under app_name)"}
-  - {name: version,     type: String, default: "", description: "Optional version; empty => UTC timestamp"}
-
+  - {name: bucket,          type: String, description: "MinIO bucket"}
+  - {name: app_name,        type: String, description: "Application namespace under bucket"}
+  - {name: model_name,      type: String, description: "Model name (directory under app_name)"}
+  - {name: version,         type: String, default: "", description: "Optional version; empty => UTC timestamp"}
 outputs:
   - {name: model_uri,     type: String, description: "s3://<bucket>/<app>/<model>/<version>/"}
   - {name: manifest_json, type: Data,   description: "JSON manifest of uploaded files"}
-
 implementation:
   container:
     image: minio/mc:latest
@@ -26,7 +23,7 @@ implementation:
         BUCKET="$5"; APP="$6"; NAME="$7"; VERSION="$8"
         OUT_URI="$9"; OUT_MANIFEST="${10}"
 
-        # ---- Hard-coded MinIO endpoint & credentials (as requested) ----
+        # ---- Hard-coded MinIO endpoint & credentials ----
         S3_ENDPOINT="http://minio-service.kubeflow.svc.cluster.local:9000"
         S3_ACCESS="minio"
         S3_SECRET="QL2YJ8G5PCE13KVW19JBLUSQDHRJZF"
@@ -175,8 +172,9 @@ implementation:
         DEST="myminio/${BUCKET}/${APP}/${NAME}/${VERSION}/"
         mc cp --recursive "${STAGE}/" "${DEST}"
 
-        # Output s3:// URI (for KServe)
-        printf "s3://%s/%s/%s/%s/\n" "${BUCKET}" "${APP}" "${NAME}" "${VERSION}" > "${OUT_URI}"
+        # Output s3:// URI (for KServe) — avoid printf wrapping issues
+        URI="s3://${BUCKET}/${APP}/${NAME}/${VERSION}/"
+        echo "${URI}" > "${OUT_URI}"
       - {inputPath: learned_weights}
       - {inputPath: model_py}
       - {inputPath: model_config}
