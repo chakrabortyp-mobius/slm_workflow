@@ -1,5 +1,5 @@
 name: Package & Upload Gemma3 to MinIO (hardcoded)
-description: Stages Gemma3 artifacts + MLServer runtime files and uploads to MinIO. Outputs a single s3:// URI for KServe.
+description: Stage Gemma3 artifacts + MLServer runtime, upload to MinIO, and output s3:// URI for KServe.
 inputs:
   - {name: learned_weights, type: Model, description: "Trained weights (.pth or .pt)"}
   - {name: model_py,        type: Data,  description: "Model implementation Python file"}
@@ -9,16 +9,16 @@ inputs:
   - {name: bucket,      type: String, description: "MinIO bucket"}
   - {name: app_name,    type: String, description: "Application namespace under bucket"}
   - {name: model_name,  type: String, description: "Model name (directory under app_name)"}
-  - {name: version,     type: String, default: "", description: "Optional version; if empty current UTC timestamp is used"}
+  - {name: version,     type: String, default: "", description: "Optional version; empty => UTC timestamp"}
 
 outputs:
-  - {name: model_uri,      type: String, description: "s3://<bucket>/<app>/<model>/<version>/"}
-  - {name: manifest_json,  type: Data,   description: "JSON manifest of uploaded files"}
+  - {name: model_uri,     type: String, description: "s3://<bucket>/<app>/<model>/<version>/"}
+  - {name: manifest_json, type: Data,   description: "JSON manifest of uploaded files"}
 
 implementation:
   container:
     image: minio/mc:latest
-    command: ['sh', '-eu', '-c']
+    command: ["sh", "-eu", "-c"]
     args:
       - |
         # ---- Positional args from KFP "args" (below) ----
@@ -31,7 +31,7 @@ implementation:
         S3_ACCESS="minio"
         S3_SECRET="QL2YJ8G5PCE13KVW19JBLUSQDHRJZF"
 
-        # ---- Validate inputs ----
+        # ---- Validate ----
         [ -n "${BUCKET}" ] || { echo "bucket is required" >&2; exit 1; }
         [ -n "${APP}"    ] || { echo "app_name is required" >&2; exit 1; }
         [ -n "${NAME}"   ] || { echo "model_name is required" >&2; exit 1; }
@@ -40,20 +40,20 @@ implementation:
         [ -s "${TOKENIZER}"   ] || { echo "tokenizer_json missing/empty" >&2; exit 1; }
         [ -s "${WEIGHTS}"     ] || { echo "learned_weights missing/empty" >&2; exit 1; }
 
-        # Auto-version if empty (UTC timestamp)
+        # Auto-version if empty
         if [ -z "${VERSION}" ]; then VERSION="$(date -u +'%Y%m%dT%H%M%SZ')"; fi
 
         STAGE="/tmp/mlserver_pkg"
         mkdir -p "${STAGE}"
 
-        # ---- Stage artifacts with expected names ----
+        # ---- Stage artifacts ----
         cp "${MODEL_PY}"    "${STAGE}/model.py"
         cp "${CONFIG_JSON}" "${STAGE}/config.json"
         cp "${TOKENIZER}"   "${STAGE}/tokenizer.json"
-        # Support either .pth or .pt as input
+        # accept .pth or .pt
         if cp "${WEIGHTS}" "${STAGE}/best_weights.pth" 2>/dev/null; then :; else cp "${WEIGHTS}" "${STAGE}/best_weights.pt"; fi
 
-        # ---- Generate MLServer runtime shim (raw-text aware) ----
+        # ---- MLServer runtime (raw-text aware) ----
         cat > "${STAGE}/runtime.py" <<'PY'
         from mlserver import MLModel
         from mlserver.types import InferenceRequest, InferenceResponse, ResponseOutput, Parameters, TensorDatatype
@@ -71,22 +71,18 @@ implementation:
             with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
               self.cfg = json.load(f)
             self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower()=="float16" else torch.float32
-
             ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
             self.model = ModelCls(self.cfg)
-
             w_pt  = os.path.join(base, "best_weights.pt")
             w_pth = os.path.join(base, "best_weights.pth")
             state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
             self.model.load_state_dict(state, strict=True)
             self.model.eval()
-
             from tokenizers import Tokenizer
             tok_path = os.path.join(base, "tokenizer.json")
             if not os.path.exists(tok_path):
               raise FileNotFoundError("tokenizer.json is required for raw-text inference")
             self.tokenizer = Tokenizer.from_file(tok_path)
-
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.model.to(self.device)
             self.ctx_len = int(self.cfg.get("context_length", 2048))
@@ -143,32 +139,14 @@ implementation:
             return InferenceResponse(
               model_name=self.name,
               outputs=[
-                ResponseOutput(
-                  name="last_logits",
-                  shape=[len(last_list), len(last_list[0])],
-                  datatype=TensorDatatype.FP32,
-                  data=last_list,
-                  parameters=Parameters()
-                ),
-                ResponseOutput(
-                  name="next_token_id",
-                  shape=[len(next_ids)],
-                  datatype=TensorDatatype.INT64,
-                  data=next_ids,
-                  parameters=Parameters()
-                ),
-                ResponseOutput(
-                  name="next_token",
-                  shape=[len(next_tokens)],
-                  datatype=TensorDatatype.BYTES,
-                  data=next_tokens,
-                  parameters=Parameters()
-                )
+                ResponseOutput(name="last_logits", shape=[len(last_list), len(last_list[0])], datatype=TensorDatatype.FP32, data=last_list, parameters=Parameters()),
+                ResponseOutput(name="next_token_id", shape=[len(next_ids)], datatype=TensorDatatype.INT64, data=next_ids, parameters=Parameters()),
+                ResponseOutput(name="next_token", shape=[len(next_tokens)], datatype=TensorDatatype.BYTES, data=next_tokens, parameters=Parameters())
               ]
             )
         PY
 
-        # ---- MLServer descriptor ----
+        # MLServer descriptor
         cat > "${STAGE}/model-settings.json" <<JSON
         {
           "name": "${NAME}",
@@ -177,28 +155,28 @@ implementation:
         }
         JSON
 
-        # ---- Manifest (name + size only) ----
+        # Manifest
         {
-          echo '{ "files": ['
+          echo "{ \"files\": ["
           first=1
           for f in model.py runtime.py model-settings.json config.json best_weights.pth best_weights.pt tokenizer.json; do
             [ -f "${STAGE}/$f" ] || continue
-            sz=$(wc -c < "${STAGE}/$f" | tr -d ' ')
-            [ $first -eq 0 ] && echo ','
-            printf '  { "name":"%s", "size":%s }' "$f" "$sz"
+            sz="$(wc -c < "${STAGE}/$f" | tr -d ' ')"
+            if [ $first -eq 0 ]; then echo ","; fi
+            printf "  { \"name\":\"%s\", \"size\":%s }" "$f" "$sz"
             first=0
           done
-          echo '] }'
+          echo "] }"
         } > "${OUT_MANIFEST}"
 
-        # ---- Upload to MinIO (hard-coded creds) ----
+        # Upload
         mc alias set myminio "${S3_ENDPOINT}" "${S3_ACCESS}" "${S3_SECRET}"
         mc mb --ignore-existing "myminio/${BUCKET}"
         DEST="myminio/${BUCKET}/${APP}/${NAME}/${VERSION}/"
         mc cp --recursive "${STAGE}/" "${DEST}"
 
-        # ---- Output s3:// URI (for KServe Model URI) ----
-        printf 's3://%s/%s/%s/%s/\n' "${BUCKET}" "${APP}" "${NAME}" "${VERSION}" > "${OUT_URI}"
+        # Output s3:// URI (for KServe)
+        printf "s3://%s/%s/%s/%s/\n" "${BUCKET}" "${APP}" "${NAME}" "${VERSION}" > "${OUT_URI}"
       - {inputPath: learned_weights}
       - {inputPath: model_py}
       - {inputPath: model_config}
