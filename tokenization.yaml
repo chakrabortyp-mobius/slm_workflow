@@ -27,14 +27,13 @@ outputs:
 
 implementation:
   container:
-    image: python:3.9
+    image: nikhilv215/nesy-factory:v20
     command:
       - bash
       - -ec
       - |-
         set -o pipefail
-        python3 -m pip install --quiet --no-cache-dir tokenizers
-
+        
         cat >/tmp/train_tokenizer.py <<'PY'
         import argparse, json, os
         from tokenizers import Tokenizer
@@ -170,7 +169,7 @@ implementation:
             main()
         PY
 
-        python3 -u /tmp/train_tokenizer.py "$0" "$@"
+        python3 -u /tmp/train_tokenizer.py "$@"
     args:
       - --train-corpus
       - {inputPath: train_corpus}
