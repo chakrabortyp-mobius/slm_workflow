@@ -29,13 +29,12 @@ outputs:
     description: "CSV with prompts, ground truth, and predictions"
 implementation:
   container:
-    image: python:3.9
+    image: nikhilv215/nesy-factory:v20
     command:
       - bash
       - -ec
       - |-
         set -o pipefail
-        python3 -m pip install --quiet --no-cache-dir torch pandas mlflow tokenizers nltk rouge_score
 
         python3 -u - <<'PY'
         import argparse, json, os, math, importlib.util
