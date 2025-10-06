@@ -20,14 +20,13 @@ outputs:
     type: String
 implementation:
   container:
-    image: python:3.9
+    image: nikhilv215/nesy-factory:v20
     command:
       - python3
       - -u
       - -c
       - |
         import subprocess, sys, os, json, argparse
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", "torch", "tokenizers"], check=True)
         import torch
         import torch.nn as nn
         import torch.nn.functional as F
