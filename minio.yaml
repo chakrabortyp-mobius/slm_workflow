@@ -1,4 +1,4 @@
-name: Package & Upload Gemma3 to MinIO (hardcoded)
+name: Gemma3 to MinIO (hardcoded)
 description: Stage Gemma3 artifacts + MLServer runtime, upload to MinIO, and output s3:// URI for KServe.
 
 inputs:
