@@ -1,5 +1,6 @@
 name: Package & Upload Gemma3 to MinIO (hardcoded)
 description: Stage Gemma3 artifacts + MLServer runtime, upload to MinIO, and output s3:// URI for KServe.
+
 inputs:
   - {name: learned_weights, type: Model, description: "Trained weights (.pth or .pt)"}
   - {name: model_py,        type: Data,  description: "Model implementation Python file"}
@@ -9,9 +10,11 @@ inputs:
   - {name: app_name,        type: String, description: "Application namespace under bucket"}
   - {name: model_name,      type: String, description: "Model name (directory under app_name)"}
   - {name: version,         type: String, default: "", description: "Optional version; empty => UTC timestamp"}
+
 outputs:
   - {name: model_uri,     type: String, description: "s3://<bucket>/<app>/<model>/<version>/"}
   - {name: manifest_json, type: Data,   description: "JSON manifest of uploaded files"}
+
 implementation:
   container:
     image: minio/mc:latest
@@ -28,26 +31,30 @@ implementation:
         S3_ACCESS="minio"
         S3_SECRET="QL2YJ8G5PCE13KVW19JBLUSQDHRJZF"
 
-        # ---- Validate ----
+        # ---- Validate inputs ----
         [ -n "${BUCKET}" ] || { echo "bucket is required" >&2; exit 1; }
-        [ -n "${APP}"    ] || { echo "app_name is required" >&2; exit 1; }
-        [ -n "${NAME}"   ] || { echo "model_name is required" >&2; exit 1; }
-        [ -s "${MODEL_PY}"    ] || { echo "model_py missing/empty" >&2; exit 1; }
+        [ -n "${APP}" ] || { echo "app_name is required" >&2; exit 1; }
+        [ -n "${NAME}" ] || { echo "model_name is required" >&2; exit 1; }
+        [ -s "${MODEL_PY}" ] || { echo "model_py missing/empty" >&2; exit 1; }
         [ -s "${CONFIG_JSON}" ] || { echo "model_config missing/empty" >&2; exit 1; }
-        [ -s "${TOKENIZER}"   ] || { echo "tokenizer_json missing/empty" >&2; exit 1; }
-        [ -s "${WEIGHTS}"     ] || { echo "learned_weights missing/empty" >&2; exit 1; }
+        [ -s "${TOKENIZER}" ] || { echo "tokenizer_json missing/empty" >&2; exit 1; }
+        [ -s "${WEIGHTS}" ] || { echo "learned_weights missing/empty" >&2; exit 1; }
 
         # Auto-version if empty
         if [ -z "${VERSION}" ]; then VERSION="$(date -u +'%Y%m%dT%H%M%SZ')"; fi
 
+        # Prepare staging area
         STAGE="/tmp/mlserver_pkg"
         mkdir -p "${STAGE}"
+        mkdir -p /tmp/outputs/model_uri
+        mkdir -p /tmp/outputs/manifest_json
 
         # ---- Stage artifacts ----
-        cp "${MODEL_PY}"    "${STAGE}/model.py"
+        cp "${MODEL_PY}" "${STAGE}/model.py"
         cp "${CONFIG_JSON}" "${STAGE}/config.json"
-        cp "${TOKENIZER}"   "${STAGE}/tokenizer.json"
-        # accept .pth or .pt
+        cp "${TOKENIZER}" "${STAGE}/tokenizer.json"
+
+        # Accept .pth or .pt for learned weights
         if cp "${WEIGHTS}" "${STAGE}/best_weights.pth" 2>/dev/null; then :; else cp "${WEIGHTS}" "${STAGE}/best_weights.pt"; fi
 
         # ---- MLServer runtime (raw-text aware) ----
@@ -57,93 +64,99 @@ implementation:
         import importlib.util, json, os, torch
 
         def _load_module(path, mod_name="model"):
-          spec = importlib.util.spec_from_file_location(mod_name, path)
-          if spec is None or spec.loader is None:
-            raise ImportError(f"Cannot import module from {path}")
-          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+            spec = importlib.util.spec_from_file_location(mod_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Cannot import module from {path}")
+            m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
         class Gemma3Runtime(MLModel):
-          async def load(self) -> bool:
-            base = os.getenv("MLSERVER_MODEL_PARAMETERS_URI", ".")
-            with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
-              self.cfg = json.load(f)
-            self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower()=="float16" else torch.float32
-            ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
-            self.model = ModelCls(self.cfg)
-            w_pt  = os.path.join(base, "best_weights.pt")
-            w_pth = os.path.join(base, "best_weights.pth")
-            state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
-            self.model.load_state_dict(state, strict=True)
-            self.model.eval()
-            from tokenizers import Tokenizer
-            tok_path = os.path.join(base, "tokenizer.json")
-            if not os.path.exists(tok_path):
-              raise FileNotFoundError("tokenizer.json is required for raw-text inference")
-            self.tokenizer = Tokenizer.from_file(tok_path)
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.model.to(self.device)
-            self.ctx_len = int(self.cfg.get("context_length", 2048))
-            return True
+            async def load(self) -> bool:
+                base = os.getenv("MLSERVER_MODEL_PARAMETERS_URI", ".")
+                with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
+                    self.cfg = json.load(f)
+                self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower() == "float16" else torch.float32
+                ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
+                self.model = ModelCls(self.cfg)
+                w_pt = os.path.join(base, "best_weights.pt")
+                w_pth = os.path.join(base, "best_weights.pth")
+                state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
+                self.model.load_state_dict(state, strict=True)
+                self.model.eval()
+                from tokenizers import Tokenizer
+                tok_path = os.path.join(base, "tokenizer.json")
+                if not os.path.exists(tok_path):
+                    raise FileNotFoundError("tokenizer.json is required for raw-text inference")
+                self.tokenizer = Tokenizer.from_file(tok_path)
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                self.model.to(self.device)
+                self.ctx_len = int(self.cfg.get("context_length", 2048))
+                return True
 
-          def _encode_batch(self, texts):
-            ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
-            ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
-            maxlen = max(len(x) for x in ids_list)
-            pad_id = self.tokenizer.token_to_id("[PAD]") or 0
-            padded = [x + [pad_id]*(maxlen-len(x)) for x in ids_list]
-            return torch.tensor(padded, dtype=torch.long, device=self.device)
+            def _encode_batch(self, texts):
+                ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
+                ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
+                maxlen = max(len(x) for x in ids_list)
+                pad_id = self.tokenizer.token_to_id("[PAD]") or 0
+                padded = [x + [pad_id] * (maxlen - len(x)) for x in ids_list]
+                return torch.tensor(padded, dtype=torch.long, device=self.device)
 
-          def _decode_id(self, tid):
-            try: return self.tokenizer.decode([int(tid)])
-            except Exception: return ""
+            def _decode_id(self, tid):
+                try:
+                    return self.tokenizer.decode([int(tid)])
+                except Exception:
+                    return ""
 
-          async def predict(self, request: InferenceRequest) -> InferenceResponse:
-            texts = None
-            if request and request.inputs:
-              for inp in request.inputs:
-                if inp.name in ("text","texts"):
-                  val = inp.data
-                  if isinstance(val, list):
-                    texts = [v.decode("utf-8") if isinstance(v,(bytes,bytearray)) else str(v) for v in val]
-                  elif isinstance(val,(bytes,bytearray,str)):
-                    texts = [val.decode("utf-8") if isinstance(val,(bytes,bytearray)) else str(val)]
-                  break
-            if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
-              extra = request.parameters.extra
-              if "texts" in extra: texts = [str(x) for x in extra["texts"]]
-              elif "text" in extra: texts = [str(extra["text"])]
+            async def predict(self, request: InferenceRequest) -> InferenceResponse:
+                texts = None
+                if request and request.inputs:
+                    for inp in request.inputs:
+                        if inp.name in ("text", "texts"):
+                            val = inp.data
+                            if isinstance(val, list):
+                                texts = [v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else str(v) for v in val]
+                            elif isinstance(val, (bytes, bytearray, str)):
+                                texts = [val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else str(val)]
+                            break
+                if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
+                    extra = request.parameters.extra
+                    if "texts" in extra:
+                        texts = [str(x) for x in extra["texts"]]
+                    elif "text" in extra:
+                        texts = [str(extra["text"])]
 
-            if texts is not None:
-              input_ids = self._encode_batch(texts)
-            else:
-              ids = None
-              if request and request.inputs:
-                for inp in request.inputs:
-                  if inp.name in ("input_ids","inputs","input_0"): ids = inp.data; break
-              if ids is None:
-                raise ValueError("Provide raw `text`/`texts` or pre-tokenized `input_ids`")
-              if isinstance(ids, list) and ids and isinstance(ids[0], int):
-                ids = [ids]
-              input_ids = torch.tensor(ids, dtype=torch.long, device=self.device)
+                if texts is not None:
+                    input_ids = self._encode_batch(texts)
+                else:
+                    ids = None
+                    if request and request.inputs:
+                        for inp in request.inputs:
+                            if inp.name in ("input_ids", "inputs", "input_0"):
+                                ids = inp.data
+                                break
+                    if ids is None:
+                        raise ValueError("Provide raw `text`/`texts` or pre-tokenized `input_ids`")
+                    if isinstance(ids, list) and ids and isinstance(ids[0], int):
+                        ids = [ids]
+                    input_ids = torch.tensor(ids, dtype=torch.long, device=self.device)
 
-            with torch.inference_mode():
-              logits, _ = self.model(input_ids)
-              last = logits[:, -1, :]
-              next_ids = last.argmax(dim=-1).tolist()
-              next_tokens = [self._decode_id(t) for t in next_ids]
-              last_list = last.float().cpu().tolist()
+                with torch.inference_mode():
+                    logits, _ = self.model(input_ids)
+                    last = logits[:, -1, :]
+                    next_ids = last.argmax(dim=-1).tolist()
+                    next_tokens = [self._decode_id(t) for t in next_ids]
+                    last_list = last.float().cpu().tolist()
 
-            return InferenceResponse(
-              model_name=self.name,
-              outputs=[
-                ResponseOutput(name="last_logits", shape=[len(last_list), len(last_list[0])], datatype=TensorDatatype.FP32, data=last_list, parameters=Parameters()),
-                ResponseOutput(name="next_token_id", shape=[len(next_ids)], datatype=TensorDatatype.INT64, data=next_ids, parameters=Parameters()),
-                ResponseOutput(name="next_token", shape=[len(next_tokens)], datatype=TensorDatatype.BYTES, data=next_tokens, parameters=Parameters())
-              ]
-            )
+                return InferenceResponse(
+                    model_name=self.name,
+                    outputs=[
+                        ResponseOutput(name="last_logits", shape=[len(last_list), len(last_list[0])], datatype=TensorDatatype.FP32, data=last_list, parameters=Parameters()),
+                        ResponseOutput(name="next_token_id", shape=[len(next_ids)], datatype=TensorDatatype.INT64, data=next_ids, parameters=Parameters()),
+                        ResponseOutput(name="next_token", shape=[len(next_tokens)], datatype=TensorDatatype.BYTES, data=next_tokens, parameters=Parameters())
+                    ]
+                )
         PY
 
-        # MLServer descriptor
+        # ---- MLServer descriptor ----
         cat > "${STAGE}/model-settings.json" <<JSON
         {
           "name": "${NAME}",
@@ -166,13 +179,13 @@ implementation:
           echo "] }"
         } > "${OUT_MANIFEST}"
 
-        # Upload
+        # ---- Upload to MinIO ----
         mc alias set myminio "${S3_ENDPOINT}" "${S3_ACCESS}" "${S3_SECRET}"
         mc mb --ignore-existing "myminio/${BUCKET}"
         DEST="myminio/${BUCKET}/${APP}/${NAME}/${VERSION}/"
         mc cp --recursive "${STAGE}/" "${DEST}"
 
-        # Output s3:// URI (for KServe) — avoid printf wrapping issues
+        # Output s3:// URI (for KServe)
         URI="s3://${BUCKET}/${APP}/${NAME}/${VERSION}/"
         echo "${URI}" > "${OUT_URI}"
       - {inputPath: learned_weights}
