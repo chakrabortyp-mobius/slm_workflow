@@ -188,6 +188,9 @@ implementation:
         "parameters": { "uri": "." }
       }
       JSONEOF
+
+      mkdir -p "$(dirname "$OUT_URI")"
+      mkdir -p "$(dirname "$OUT_MANIFEST")"
       
       # Create manifest
       {
@@ -214,8 +217,7 @@ implementation:
       mc cp --recursive "$STAGE/" "$DEST"
       
       # Output s3:// URI
-      mkdir -p "$(dirname "$OUT_URI")"
-      mkdir -p "$(dirname "$OUT_MANIFEST")"
+
       
       URI="s3://$BUCKET/$APP/$NAME/$VERSION/"
       echo "$URI" > "$OUT_URI"
