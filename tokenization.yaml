@@ -27,7 +27,7 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v20
+    image: nikhilv215/nesy-factory:v22
     command:
       - bash
       - -ec
