@@ -73,9 +73,8 @@ implementation:
       - -u
       - -c
       - |-
-        import subprocess, sys
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
-                        "torch>=2.2", "tokenizers", "datasets", "tqdm", "numpy"], check=True)
+        #import subprocess, sys
+        #subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", "torch>=2.2", "tokenizers", "datasets", "tqdm", "numpy"], check=True)
 
         import os, json, math, argparse, numpy as np, torch
         import torch.nn as nn, torch.nn.functional as F
