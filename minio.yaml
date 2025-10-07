@@ -15,191 +15,214 @@ outputs:
   - {name: model_uri,     type: String, description: "s3://<bucket>/<app>/<model>/<version>/"}
   - {name: manifest_json, type: Data,   description: "JSON manifest of uploaded files"}
 
+metadata:
+  annotations:
+    author: probir <chakraborty.p@mobiusdtaas.ai>
+
 implementation:
   container:
-    image: minio/mc:latest
-    command: ["sh", "-c"]
-    args:
-      - |
-        set -e
-        # ---- Positional args from KFP "args" (below) ----
-        WEIGHTS="$1"; MODEL_PY="$2"; CONFIG_JSON="$3"; TOKENIZER="$4"
-        BUCKET="$5"; APP="$6"; NAME="$7"; VERSION="$8"
-        OUT_URI="$9"; OUT_MANIFEST="${10}"
+    image: ubuntu:22.04
+    command:
+    - sh
+    - -ex
+    - -c
+    - |
+      # Update and install wget
+      apt-get -o Acquire::ForceIPv4=true update
+      apt-get -o Acquire::ForceIPv4=true install -y wget
+      
+      # Download MinIO client
+      wget https://dl.min.io/client/mc/release/linux-amd64/mc
+      chmod +x mc
+      mv mc /usr/local/bin/
+      
+      # Set up MinIO alias
+      mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 minio QL2YJ8G5PCE13KVW19JBLUSQDHRJZF
+      
+      # Read inputs
+      WEIGHTS="$0"
+      MODEL_PY="$1"
+      CONFIG_JSON="$2"
+      TOKENIZER="$3"
+      BUCKET="$4"
+      APP="$5"
+      NAME="$6"
+      VERSION="$7"
+      OUT_URI="$8"
+      OUT_MANIFEST="$9"
+      
+      # Validate inputs
+      if [ -z "$BUCKET" ]; then echo "bucket is required" >&2; exit 1; fi
+      if [ -z "$APP" ]; then echo "app_name is required" >&2; exit 1; fi
+      if [ -z "$NAME" ]; then echo "model_name is required" >&2; exit 1; fi
+      if [ ! -f "$MODEL_PY" ] || [ ! -s "$MODEL_PY" ]; then echo "model_py missing/empty" >&2; exit 1; fi
+      if [ ! -f "$CONFIG_JSON" ] || [ ! -s "$CONFIG_JSON" ]; then echo "model_config missing/empty" >&2; exit 1; fi
+      if [ ! -f "$TOKENIZER" ] || [ ! -s "$TOKENIZER" ]; then echo "tokenizer_json missing/empty" >&2; exit 1; fi
+      if [ ! -f "$WEIGHTS" ] || [ ! -s "$WEIGHTS" ]; then echo "learned_weights missing/empty" >&2; exit 1; fi
+      
+      # Auto-version if empty
+      if [ -z "$VERSION" ]; then 
+        VERSION="$(date -u +'%Y%m%dT%H%M%SZ')"
+      fi
+      
+      # Prepare staging area
+      STAGE="/tmp/mlserver_pkg"
+      mkdir -p "$STAGE"
+      
+      # Stage artifacts
+      cp "$MODEL_PY" "$STAGE/model.py"
+      cp "$CONFIG_JSON" "$STAGE/config.json"
+      cp "$TOKENIZER" "$STAGE/tokenizer.json"
+      
+      # Copy weights file
+      if echo "$WEIGHTS" | grep -q '\.pth$'; then
+        cp "$WEIGHTS" "$STAGE/best_weights.pth"
+      else
+        cp "$WEIGHTS" "$STAGE/best_weights.pt"
+      fi
+      
+      # Create MLServer runtime
+      cat > "$STAGE/runtime.py" <<'PYEOF'
+            from mlserver import MLModel
+            from mlserver.types import InferenceRequest, InferenceResponse, ResponseOutput, Parameters, TensorDatatype
+            import importlib.util, json, os, torch
 
-        # ---- Hard-coded MinIO endpoint & credentials ----
-        S3_ENDPOINT="http://minio-service.kubeflow.svc.cluster.local:9000"
-        S3_ACCESS="minio"
-        S3_SECRET="QL2YJ8G5PCE13KVW19JBLUSQDHRJZF"
+      def _load_module(path, mod_name="model"):
+      spec = importlib.util.spec_from_file_location(mod_name, path)
+      if spec is None or spec.loader is None:
+      raise ImportError(f"Cannot import module from {path}")
+      m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
-        # ---- Validate inputs ----
-        if [ -z "${BUCKET:-}" ]; then echo "bucket is required" >&2; exit 1; fi
-        if [ -z "${APP:-}" ]; then echo "app_name is required" >&2; exit 1; fi
-        if [ -z "${NAME:-}" ]; then echo "model_name is required" >&2; exit 1; fi
-        if [ ! -s "${MODEL_PY}" ]; then echo "model_py missing/empty" >&2; exit 1; fi
-        if [ ! -s "${CONFIG_JSON}" ]; then echo "model_config missing/empty" >&2; exit 1; fi
-        if [ ! -s "${TOKENIZER}" ]; then echo "tokenizer_json missing/empty" >&2; exit 1; fi
-        if [ ! -s "${WEIGHTS}" ]; then echo "learned_weights missing/empty" >&2; exit 1; fi
+      class Gemma3Runtime(MLModel):
+      async def load(self) -> bool:
+      base = os.getenv("MLSERVER_MODEL_PARAMETERS_URI", ".")
+      with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
+      self.cfg = json.load(f)
+      self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower() == "float16" else torch.float32
+      ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
+      self.model = ModelCls(self.cfg)
+      w_pt = os.path.join(base, "best_weights.pt")
+      w_pth = os.path.join(base, "best_weights.pth")
+      state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
+      self.model.load_state_dict(state, strict=True)
+      self.model.eval()
+      from tokenizers import Tokenizer
+      tok_path = os.path.join(base, "tokenizer.json")
+      if not os.path.exists(tok_path):
+      raise FileNotFoundError("tokenizer.json is required for raw-text inference")
+      self.tokenizer = Tokenizer.from_file(tok_path)
+      self.device = "cuda" if torch.cuda.is_available() else "cpu"
+      self.model.to(self.device)
+      self.ctx_len = int(self.cfg.get("context_length", 2048))
+      return True
 
-        # Auto-version if empty
-        if [ -z "${VERSION:-}" ]; then VERSION="$(date -u +'%Y%m%dT%H%M%SZ')"; fi
+      def _encode_batch(self, texts):
+      ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
+      ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
+      maxlen = max(len(x) for x in ids_list)
+      pad_id = self.tokenizer.token_to_id("[PAD]") or 0
+      padded = [x + [pad_id] * (maxlen - len(x)) for x in ids_list]
+      return torch.tensor(padded, dtype=torch.long, device=self.device)
 
-        # Prepare staging area
-        STAGE="/tmp/mlserver_pkg"
-        mkdir -p "${STAGE}"
-        mkdir -p "$(dirname "${OUT_URI}")"
-        mkdir -p "$(dirname "${OUT_MANIFEST}")"
+      def _decode_id(self, tid):
+      try:
+      return self.tokenizer.decode([int(tid)])
+      except Exception:
+      return ""
 
-        # ---- Stage artifacts ----
-        cp "${MODEL_PY}" "${STAGE}/model.py"
-        cp "${CONFIG_JSON}" "${STAGE}/config.json"
-        cp "${TOKENIZER}" "${STAGE}/tokenizer.json"
+      async def predict(self, request: InferenceRequest) -> InferenceResponse:
+      texts = None
+      if request and request.inputs:
+      for inp in request.inputs:
+      if inp.name in ("text", "texts"):
+      val = inp.data
+      if isinstance(val, list):
+      texts = [v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else str(v) for v in val]
+      elif isinstance(val, (bytes, bytearray, str)):
+      texts = [val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else str(val)]
+      break
+      if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
+      extra = request.parameters.extra
+      if "texts" in extra:
+      texts = [str(x) for x in extra["texts"]]
+      elif "text" in extra:
+      texts = [str(extra["text"])]
 
-        # Accept .pth or .pt for learned weights
-        if echo "${WEIGHTS}" | grep -q '\.pth$'; then
-          cp "${WEIGHTS}" "${STAGE}/best_weights.pth"
-        else
-          cp "${WEIGHTS}" "${STAGE}/best_weights.pt"
-        fi
+      if texts is not None:
+      input_ids = self._encode_batch(texts)
+      else:
+      ids = None
+      if request and request.inputs:
+      for inp in request.inputs:
+      if inp.name in ("input_ids", "inputs", "input_0"):
+      ids = inp.data
+      break
+      if ids is None:
+      raise ValueError("Provide raw `text`/`texts` or pre-tokenized `input_ids`")
+      if isinstance(ids, list) and ids and isinstance(ids[0], int):
+      ids = [ids]
+      input_ids = torch.tensor(ids, dtype=torch.long, device=self.device)
 
-        # ---- MLServer runtime (raw-text aware) ----
-        cat > "${STAGE}/runtime.py" <<'PY'
-        from mlserver import MLModel
-        from mlserver.types import InferenceRequest, InferenceResponse, ResponseOutput, Parameters, TensorDatatype
-        import importlib.util, json, os, torch
+      with torch.inference_mode():
+      logits, _ = self.model(input_ids)
+      last = logits[:, -1, :]
+      next_ids = last.argmax(dim=-1).tolist()
+      next_tokens = [self._decode_id(t) for t in next_ids]
+      last_list = last.float().cpu().tolist()
 
-        def _load_module(path, mod_name="model"):
-            spec = importlib.util.spec_from_file_location(mod_name, path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Cannot import module from {path}")
-            m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+      return InferenceResponse(
+      model_name=self.name,
+      outputs=[
+      ResponseOutput(name="last_logits", shape=[len(last_list), len(last_list[0])], datatype=TensorDatatype.FP32, data=last_list, parameters=Parameters()),
+      ResponseOutput(name="next_token_id", shape=[len(next_ids)], datatype=TensorDatatype.INT64, data=next_ids, parameters=Parameters()),
+      ResponseOutput(name="next_token", shape=[len(next_tokens)], datatype=TensorDatatype.BYTES, data=next_tokens, parameters=Parameters())
+      ]
+      )
+      PYEOF
 
-        class Gemma3Runtime(MLModel):
-            async def load(self) -> bool:
-                base = os.getenv("MLSERVER_MODEL_PARAMETERS_URI", ".")
-                with open(os.path.join(base, "config.json"), "r", encoding="utf-8") as f:
-                    self.cfg = json.load(f)
-                self.cfg["dtype"] = torch.float16 if str(self.cfg.get("dtype")).lower() == "float16" else torch.float32
-                ModelCls = getattr(_load_module(os.path.join(base, "model.py")), "Gemma3Model")
-                self.model = ModelCls(self.cfg)
-                w_pt = os.path.join(base, "best_weights.pt")
-                w_pth = os.path.join(base, "best_weights.pth")
-                state = torch.load(w_pth if os.path.exists(w_pth) else w_pt, map_location="cpu")
-                self.model.load_state_dict(state, strict=True)
-                self.model.eval()
-                from tokenizers import Tokenizer
-                tok_path = os.path.join(base, "tokenizer.json")
-                if not os.path.exists(tok_path):
-                    raise FileNotFoundError("tokenizer.json is required for raw-text inference")
-                self.tokenizer = Tokenizer.from_file(tok_path)
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
-                self.model.to(self.device)
-                self.ctx_len = int(self.cfg.get("context_length", 2048))
-                return True
-
-            def _encode_batch(self, texts):
-                ids_list = [self.tokenizer.encode(str(t)).ids for t in texts]
-                ids_list = [ids[-self.ctx_len:] if len(ids) > self.ctx_len else ids for ids in ids_list]
-                maxlen = max(len(x) for x in ids_list)
-                pad_id = self.tokenizer.token_to_id("[PAD]") or 0
-                padded = [x + [pad_id] * (maxlen - len(x)) for x in ids_list]
-                return torch.tensor(padded, dtype=torch.long, device=self.device)
-
-            def _decode_id(self, tid):
-                try:
-                    return self.tokenizer.decode([int(tid)])
-                except Exception:
-                    return ""
-
-            async def predict(self, request: InferenceRequest) -> InferenceResponse:
-                texts = None
-                if request and request.inputs:
-                    for inp in request.inputs:
-                        if inp.name in ("text", "texts"):
-                            val = inp.data
-                            if isinstance(val, list):
-                                texts = [v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else str(v) for v in val]
-                            elif isinstance(val, (bytes, bytearray, str)):
-                                texts = [val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else str(val)]
-                            break
-                if texts is None and getattr(request, "parameters", None) and isinstance(request.parameters.extra, dict):
-                    extra = request.parameters.extra
-                    if "texts" in extra:
-                        texts = [str(x) for x in extra["texts"]]
-                    elif "text" in extra:
-                        texts = [str(extra["text"])]
-
-                if texts is not None:
-                    input_ids = self._encode_batch(texts)
-                else:
-                    ids = None
-                    if request and request.inputs:
-                        for inp in request.inputs:
-                            if inp.name in ("input_ids", "inputs", "input_0"):
-                                ids = inp.data
-                                break
-                    if ids is None:
-                        raise ValueError("Provide raw `text`/`texts` or pre-tokenized `input_ids`")
-                    if isinstance(ids, list) and ids and isinstance(ids[0], int):
-                        ids = [ids]
-                    input_ids = torch.tensor(ids, dtype=torch.long, device=self.device)
-
-                with torch.inference_mode():
-                    logits, _ = self.model(input_ids)
-                    last = logits[:, -1, :]
-                    next_ids = last.argmax(dim=-1).tolist()
-                    next_tokens = [self._decode_id(t) for t in next_ids]
-                    last_list = last.float().cpu().tolist()
-
-                return InferenceResponse(
-                    model_name=self.name,
-                    outputs=[
-                        ResponseOutput(name="last_logits", shape=[len(last_list), len(last_list[0])], datatype=TensorDatatype.FP32, data=last_list, parameters=Parameters()),
-                        ResponseOutput(name="next_token_id", shape=[len(next_ids)], datatype=TensorDatatype.INT64, data=next_ids, parameters=Parameters()),
-                        ResponseOutput(name="next_token", shape=[len(next_tokens)], datatype=TensorDatatype.BYTES, data=next_tokens, parameters=Parameters())
-                    ]
-                )
-        PY
-
-        # ---- MLServer descriptor ----
-        cat > "${STAGE}/model-settings.json" <<JSON
-        {
-          "name": "${NAME}",
-          "implementation": "runtime.Gemma3Runtime",
-          "parameters": { "uri": "." }
-        }
-        JSON
-
-        # Manifest
-        {
-          echo "{ \"files\": ["
-          first=1
-          for f in model.py runtime.py model-settings.json config.json best_weights.pth best_weights.pt tokenizer.json; do
-            [ -f "${STAGE}/$f" ] || continue
-            sz="$(wc -c < "${STAGE}/$f" | tr -d ' ')"
+      # Create MLServer descriptor
+      cat > "$STAGE/model-settings.json" <<JSONEOF
+      {
+        "name": "$NAME",
+        "implementation": "runtime.Gemma3Runtime",
+        "parameters": { "uri": "." }
+      }
+      JSONEOF
+      
+      # Create manifest
+      {
+        echo '{ "files": ['
+        first=1
+        for f in model.py runtime.py model-settings.json config.json best_weights.pth best_weights.pt tokenizer.json; do
+          if [ -f "$STAGE/$f" ]; then
+            sz=$(wc -c < "$STAGE/$f" | tr -d ' ')
             if [ $first -eq 0 ]; then echo ","; fi
-            printf "  { \"name\":\"%s\", \"size\":%s }" "$f" "$sz"
+            printf '  { "name":"%s", "size":%s }' "$f" "$sz"
             first=0
-          done
-          echo "] }"
-        } > "${OUT_MANIFEST}"
-
-        # ---- Upload to MinIO ----
-        mc alias set myminio "${S3_ENDPOINT}" "${S3_ACCESS}" "${S3_SECRET}"
-        mc mb --ignore-existing "myminio/${BUCKET}"
-        DEST="myminio/${BUCKET}/${APP}/${NAME}/${VERSION}/"
-        mc cp --recursive "${STAGE}/" "${DEST}"
-
-        # Output s3:// URI (for KServe)
-        URI="s3://${BUCKET}/${APP}/${NAME}/${VERSION}/"
-        echo "${URI}" > "${OUT_URI}"
-      - {inputPath: learned_weights}
-      - {inputPath: model_py}
-      - {inputPath: model_config}
-      - {inputPath: tokenizer_json}
-      - {inputValue: bucket}
-      - {inputValue: app_name}
-      - {inputValue: model_name}
-      - {inputValue: version}
-      - {outputPath: model_uri}
-      - {outputPath: manifest_json}
+          fi
+        done
+        echo ' ] }'
+      } > "$OUT_MANIFEST"
+      
+      # Check if bucket exists, create if not
+      if ! mc ls myminio/"$BUCKET"; then
+        mc mb myminio/"$BUCKET"
+      fi
+      
+      # Upload to MinIO
+      DEST="myminio/$BUCKET/$APP/$NAME/$VERSION/"
+      mc cp --recursive "$STAGE/" "$DEST"
+      
+      # Output s3:// URI
+      URI="s3://$BUCKET/$APP/$NAME/$VERSION/"
+      echo "$URI" > "$OUT_URI"
+    - inputPath: learned_weights
+    - inputPath: model_py
+    - inputPath: model_config
+    - inputPath: tokenizer_json
+    - inputValue: bucket
+    - inputValue: app_name
+    - inputValue: model_name
+    - inputValue: version
+    - outputPath: model_uri
+    - outputPath: manifest_json
