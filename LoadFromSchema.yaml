@@ -2,7 +2,7 @@ name: Load and extract text from structured document API
 description: Fetches nested JSON from API and extracts all content and titles for model training
 inputs:
   - {name: api_url, type: String}
-  - {name: access_token, type: String}
+  - {name: access_token, type: string}
 outputs:
   - {name: extracted_text, type: Data}
   - {name: metadata, type: Data}
