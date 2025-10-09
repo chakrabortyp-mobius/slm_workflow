@@ -158,6 +158,8 @@ implementation:
             json.dump(meta, f, indent=2)
 
         logger.info('Done')
+
+    args:
       - --api_url
       - {inputValue: api_url}
       - --access_token
