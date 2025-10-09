@@ -164,11 +164,11 @@ implementation:
 
         meta = {}
         os.makedirs(os.path.dirname(args.metadata) or '.', exist_ok=True)
-        with open(args.metadata, "w", encoding="utf-8") as f:
+        with open(args.metadata, 'w', encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
-        logger.info(f"Wrote {len(df)} lines to {args.extracted_text}")
-        logger.info(f"Wrote metadata to {args.metadata}")
+        logger.info(f'Wrote {len(df)} lines to {args.extracted_text}')
+        logger.info(f'Wrote metadata to {args.metadata}')
     args:
       - --api_url
       - {inputValue: api_url}
