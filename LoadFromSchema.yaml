@@ -13,7 +13,7 @@ implementation:
       - sh
       - -c
       - |
-        exec "$0" "$@"
+        exec '$0' '$@'
       - python3
       - -u
       - -c
@@ -36,45 +36,45 @@ implementation:
         args = parser.parse_args()
 
         logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger("text_extractor")
+        logger = logging.getLogger('text_extractor')
 
-        token_arg = (args.access_token or "").strip()
+        token_arg = (args.access_token or '').strip()
         if os.path.exists(token_arg):
             with open(token_arg, 'r') as f:
                 access_token = f.read().strip()
-            logger.info("Read token from file")
+            logger.info('Read token from file')
         else:
             access_token = token_arg
-            logger.info("Using token string")
+            logger.info('Using token string')
 
         if not access_token:
-            raise ValueError("Access token is empty")
+            raise ValueError('Access token is empty')
 
         session = requests.Session()
         retries = Retry(
             total=5,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"]
+            allowed_methods=['GET', 'POST']
         )
         adapter = HTTPAdapter(max_retries=retries)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
 
-        headers = {"Authorization": f"Bearer {access_token}"}
+        headers = {'Authorization': f'Bearer {access_token}'}
 
         try:
-            logger.info("Sending API request")
+            logger.info('Sending API request')
             resp = session.get(args.api_url, headers=headers, timeout=60)
             resp.raise_for_status()
             raw_data = resp.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {e}")
+            logger.error(f'API request failed: {e}')
             raise
 
-        CHILD_KEYS = ("subsections", "sections", "children", "items")
-        TITLE_KEYS = ("title", "heading", "name")
-        CONTENT_KEYS = ("content", "text", "body")
+        CHILD_KEYS = ('subsections', 'sections', 'children', 'items')
+        TITLE_KEYS = ('title', 'heading', 'name')
+        CONTENT_KEYS = ('content', 'text', 'body')
 
         def iter_children(node):
             for k in CHILD_KEYS:
@@ -87,17 +87,17 @@ implementation:
             for k in keys:
                 if k in node and node[k]:
                     return str(node[k]).strip()
-            return ""
+            return ''
 
-        def extract_text_recursive(node, path=""):
+        def extract_text_recursive(node, path=''):
             results = []
             title = get_first(node, TITLE_KEYS)
             content = get_first(node, CONTENT_KEYS)
             if title or content:
-                results.append({"title": title, "content": content, "path": path})
+                results.append({'title': title, 'content': content, 'path': path})
             children = iter_children(node)
             for idx, child in enumerate(children):
-                sub_path = f"{path}/subsection_{idx}" if path else f"subsection_{idx}"
+                sub_path = f'{path}/subsection_{idx}' if path else f'subsection_{idx}'
                 results.extend(extract_text_recursive(child, sub_path))
             return results
 
@@ -107,40 +107,40 @@ implementation:
         total_results = 0
 
         for resp_idx, response_data in enumerate(response_items):
-            response_obj = (response_data or {}).get("response", {})
-            individual_results = response_obj.get("individualResults", [])
+            response_obj = (response_data or {}).get('response', {})
+            individual_results = response_obj.get('individualResults', [])
             total_individual += len(individual_results)
-            logger.info(f"Processing {len(individual_results)} individual results")
+            logger.info(f'Processing {len(individual_results)} individual results')
 
             for ind_idx, result in enumerate(individual_results):
-                original_result = result.get("originalResult", {})
-                results_list = original_result.get("results", [])
+                original_result = result.get('originalResult', {})
+                results_list = original_result.get('results', [])
                 total_results += len(results_list)
 
                 for res_idx, res in enumerate(results_list):
-                    data = res.get("data", {})
-                    structured_data = data.get("structuredTextJsonData", {})
-                    document = structured_data.get("document", {})
-                    extracted_items = extract_text_recursive(document, f"resp_{resp_idx}_ind_{ind_idx}_res_{res_idx}")
+                    data = res.get('data', {})
+                    structured_data = data.get('structuredTextJsonData', {})
+                    document = structured_data.get('document', {})
+                    extracted_items = extract_text_recursive(document, f'resp_{resp_idx}_ind_{ind_idx}_res_{res_idx}')
                     for item in extracted_items:
                         item.update({
-                            "response_index": resp_idx,
-                            "individual_index": ind_idx,
-                            "result_index": ind_idx,
-                            "result_inner_index": res_idx,
-                            "url": result.get("url", ""),
-                            "success": result.get("success", False),
-                            "processing_time": result.get("processing_time", 0)
+                            'response_index': resp_idx,
+                            'individual_index': ind_idx,
+                            'result_index': ind_idx,
+                            'result_inner_index': res_idx,
+                            'url': result.get('url', ''),
+                            'success': result.get('success', False),
+                            'processing_time': result.get('processing_time', 0)
                         })
                     all_rows.extend(extracted_items)
 
-        logger.info(f"Processed {len(response_items)} responses, extracted {len(all_rows)} segments")
+        logger.info(f'Processed {len(response_items)} responses, extracted {len(all_rows)} segments')
 
-        df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["title","content"])
+        df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=['title','content'])
 
         def normalize_linebreaks(s):
             if not s:
-                return ""
+                return ''
             s = re.sub(r'\s+', ' ', s)
             return s.strip()
 
@@ -149,22 +149,22 @@ implementation:
             t = normalize_linebreaks(row.get('title') or '')
             c = normalize_linebreaks(row.get('content') or '')
             parts = [p for p in (t, c) if p]
-            return " ".join(parts)
+            return ' '.join(parts)
 
         if len(df) > 0:
-            df["full_text"] = df.apply(combine_row, axis=1)
-            df = df[df["full_text"].str.len() > 0].reset_index(drop=True)
+            df['full_text'] = df.apply(combine_row, axis=1)
+            df = df[df['full_text'].str.len() > 0].reset_index(drop=True)
         else:
-            df = pd.DataFrame({"full_text": []})
+            df = pd.DataFrame({'full_text': []})
 
-        os.makedirs(os.path.dirname(args.extracted_text) or ".", exist_ok=True)
-        with open(args.extracted_text, "w", encoding="utf-8") as f:
-            for line in df["full_text"]:
-                f.write(line + "\n")
+        os.makedirs(os.path.dirname(args.extracted_text) or '.', exist_ok=True)
+        with open(args.extracted_text, 'w', encoding='utf-8') as f:
+            for line in df['full_text']:
+                f.write(line + '\n')
 
         meta = {}
         os.makedirs(os.path.dirname(args.metadata) or '.', exist_ok=True)
-        with open(args.metadata, 'w', encoding="utf-8") as f:
+        with open(args.metadata, 'w', encoding='utf-8') as f:
             json.dump(meta, f, indent=2)
 
         logger.info(f'Wrote {len(df)} lines to {args.extracted_text}')
