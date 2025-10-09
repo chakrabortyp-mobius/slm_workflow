@@ -35,7 +35,7 @@ implementation:
         args = parser.parse_args()
 
         logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger("extractor")
+        logger = logging.getLogger('extractor')
 
         token_arg = args.access_token.strip()
         if os.path.exists(token_arg):
@@ -47,22 +47,22 @@ implementation:
         session = requests.Session()
         retries = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retries)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
 
-        headers = {"Authorization": "Bearer " + access_token}
+        headers = {'Authorization': 'Bearer ' + access_token}
 
         try:
             resp = session.get(args.api_url, headers=headers, timeout=60)
             resp.raise_for_status()
             raw_data = resp.json()
         except Exception as e:
-            logger.error("API failed: " + str(e))
+            logger.error('API failed: ' + str(e))
             raise
 
-        CHILD_KEYS = ["subsections", "sections", "children", "items"]
-        TITLE_KEYS = ["title", "heading", "name"]
-        CONTENT_KEYS = ["content", "text", "body"]
+        CHILD_KEYS = ['subsections', 'sections', 'children', 'items']
+        TITLE_KEYS = ['title', 'heading', 'name']
+        CONTENT_KEYS = ['content', 'text', 'body']
 
         def iter_children(node):
             for k in CHILD_KEYS:
@@ -76,17 +76,17 @@ implementation:
                 val = node.get(k)
                 if val:
                     return str(val).strip()
-            return ""
+            return ''
 
-        def extract_recursive(node, path=""):
+        def extract_recursive(node, path=''):
             results = []
             title = get_first(node, TITLE_KEYS)
             content = get_first(node, CONTENT_KEYS)
             if title or content:
-                results.append({"title": title, "content": content, "path": path})
+                results.append({'title': title, 'content': content, 'path': path})
             children = iter_children(node)
             for idx, child in enumerate(children):
-                subpath = path + "/sub_" + str(idx) if path else "sub_" + str(idx)
+                subpath = path + '/sub_' + str(idx) if path else 'sub_' + str(idx)
                 results.extend(extract_recursive(child, subpath))
             return results
 
@@ -94,34 +94,34 @@ implementation:
         response_items = raw_data if isinstance(raw_data, list) else [raw_data]
 
         for resp_idx, response_data in enumerate(response_items):
-            response_obj = response_data.get("response", {}) if response_data else {}
-            individual_results = response_obj.get("individualResults", [])
+            response_obj = response_data.get('response', {}) if response_data else {}
+            individual_results = response_obj.get('individualResults', [])
 
             for ind_idx, result in enumerate(individual_results):
-                original_result = result.get("originalResult", {})
-                results_list = original_result.get("results", [])
+                original_result = result.get('originalResult', {})
+                results_list = original_result.get('results', [])
 
                 for res_idx, res in enumerate(results_list):
-                    data = res.get("data", {})
-                    structured_data = data.get("structuredTextJsonData", {})
-                    document = structured_data.get("document", {})
+                    data = res.get('data', {})
+                    structured_data = data.get('structuredTextJsonData', {})
+                    document = structured_data.get('document', {})
                     
-                    path_prefix = "r" + str(resp_idx) + "_i" + str(ind_idx) + "_s" + str(res_idx)
+                    path_prefix = 'r' + str(resp_idx) + '_i' + str(ind_idx) + '_s' + str(res_idx)
                     extracted_items = extract_recursive(document, path_prefix)
                     
                     for item in extracted_items:
-                        item["response_index"] = resp_idx
-                        item["individual_index"] = ind_idx
-                        item["url"] = result.get("url", "")
+                        item['response_index'] = resp_idx
+                        item['individual_index'] = ind_idx
+                        item['url'] = result.get('url', '')
                     
                     all_rows.extend(extracted_items)
 
-        logger.info("Extracted " + str(len(all_rows)) + " segments")
+        logger.info('Extracted ' + str(len(all_rows)) + ' segments')
 
         if all_rows:
             df = pd.DataFrame(all_rows)
         else:
-            df = pd.DataFrame(columns=["title", "content"])
+            df = pd.DataFrame(columns=['title', 'content'])
 
         def clean_text(s):
             if not s:
@@ -130,26 +130,26 @@ implementation:
             return s.strip()
 
         def combine(row):
-            t = clean_text(row.get("title", ""))
-            c = clean_text(row.get("content", ""))
+            t = clean_text(row.get('title', ''))
+            c = clean_text(row.get('content', ''))
             parts = []
             if t:
                 parts.append(t)
             if c:
                 parts.append(c)
-            return " ".join(parts)
+            return ' '.join(parts)
 
         if len(df) > 0:
-            df["full_text"] = df.apply(combine, axis=1)
-            df = df[df["full_text"].str.len() > 0].reset_index(drop=True)
+            df['full_text'] = df.apply(combine, axis=1)
+            df = df[df['full_text'].str.len() > 0].reset_index(drop=True)
         else:
-            df = pd.DataFrame({"full_text": []})
+            df = pd.DataFrame({'full_text': []})
 
-        os.makedirs(os.path.dirname(args.extracted_text) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(args.extracted_text) or '.', exist_ok=True)
         with open(args.extracted_text, 'w', encoding='utf-8') as f:
-            for line in df["full_text"]:
+            for line in df['full_text']:
                 f.write(line)
-                f.write("\n")
+                f.write('\n')
 
         meta = {}
         
@@ -158,7 +158,6 @@ implementation:
             json.dump(meta, f, indent=2)
 
         logger.info('Done')
-
     args:
       - --api_url
       - {inputValue: api_url}
