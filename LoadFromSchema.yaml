@@ -151,7 +151,7 @@ implementation:
             with open(args.extracted_text, 'w', encoding='utf-8') as f:
                 for line in df['full_text']:
                     f.write(line)
-                    f.write('\n')
+                    f.write('\\n')
 
             meta = {}
             
