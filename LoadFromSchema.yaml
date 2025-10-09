@@ -151,7 +151,7 @@ implementation:
                 f.write(line)
                 f.write("\n")
 
-        meta = {"source": "structured_document_api", "responses_processed": len(response_items), "segments_exported": len(df), "status": "success" if len(df) > 0 else "empty"}
+        meta = {}
         
         os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
         with open(args.metadata, "w") as f:
