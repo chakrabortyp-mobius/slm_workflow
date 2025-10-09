@@ -52,10 +52,23 @@ implementation:
             session.mount('http://', adapter)
             session.mount('https://', adapter)
 
+
+
+
+            payload = {
+                "dbType": "TIDB",
+                "entityId": "",
+                "entityIds": [],
+                "ownedOnly": False,
+                "projections": [],
+                "filter": {},
+                "startTime": 0,
+                "endTime": 0
+            }
             headers = {'Authorization': 'Bearer ' + access_token}
 
             try:
-                resp = session.post(args.api_url, headers=headers, timeout=60)
+                resp = session.post(args.api_url, headers=headers, json=payload,timeout=60)
                 resp.raise_for_status()
                 raw_data = resp.json()
             except Exception as e:
