@@ -10,14 +10,12 @@ implementation:
   container:
     image: nikhilv215/nesy-factory:v22
     command:
-      - sh
-      - -c
-      - |
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - |
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+        
+        cat >/tmp/Load_and_extract_text.py <<'PY'
         import argparse
         import os
         import json
@@ -168,6 +166,9 @@ implementation:
 
         logger.info(f"Wrote {len(df)} lines to {args.extracted_text}")
         logger.info(f"Wrote metadata to {args.metadata}")
+
+        PY
+        python3 -u /tmp/Load_and_extract_text.py "$0" "$@"
     args:
       - --api_url
       - {inputValue: api_url}
