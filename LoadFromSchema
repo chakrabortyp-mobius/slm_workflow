@@ -1,0 +1,181 @@
+name: Load and extract text from structured document API
+description: Fetches nested JSON from API and extracts all content and titles for model training
+inputs:
+  - {name: api_url, type: String, description: 'API URL to fetch structured document JSON'}
+  - {name: access_token, type: String, description: 'Bearer access token for API auth'}
+outputs:
+  - {name: extracted_text, type: Dataset}
+  - {name: metadata, type: Dataset}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        python3 -m pip install --quiet requests pandas || \
+        python3 -m pip install --quiet requests pandas --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import pickle
+        import pandas as pd
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        import logging
+        from typing import List, Dict, Any
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--api_url', type=str, required=True, help='API URL to fetch document JSON')
+        parser.add_argument('--access_token', type=str, required=True, help='Bearer token for API')
+        parser.add_argument('--extracted_text', type=str, required=True, help='Path to output extracted text dataset')
+        parser.add_argument('--metadata', type=str, required=True, help='Path to output metadata dataset')
+        args = parser.parse_args()
+
+        with open(args.access_token, 'r') as f:
+            access_token = f.read().strip()
+        
+        # Setup logger
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger("text_extractor")
+
+        # Setup session with retry logic
+        session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        # Fetch data from API
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}"
+        }
+
+        try:
+            logger.info("Sending request to API with retries enabled")
+            resp = session.get(args.api_url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            raw_data = resp.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request failed after retries: {e}")
+            raise
+
+        def extract_text_recursive(node: Dict[str, Any], path: str = "") -> List[Dict[str, str]]:
+            """
+            Recursively extract content and title from nested document structure.
+            Returns list of dicts with extracted text and metadata.
+            """
+            results = []
+            
+            # Extract current node's content and title
+            current_item = {}
+            if "title" in node and node["title"]:
+                current_item["title"] = str(node["title"]).strip()
+            if "content" in node and node["content"]:
+                current_item["content"] = str(node["content"]).strip()
+            
+            if current_item:
+                current_item["path"] = path
+                results.append(current_item)
+            
+            # Recursively process subsections
+            if "subsections" in node and isinstance(node["subsections"], list):
+                for idx, subsection in enumerate(node["subsections"]):
+                    sub_path = f"{path}/subsection_{idx}" if path else f"subsection_{idx}"
+                    results.extend(extract_text_recursive(subsection, sub_path))
+            
+            return results
+
+        # Extract text from all individual results
+        all_extracted = []
+        
+        if isinstance(raw_data, list):
+            response_data = raw_data[0] if raw_data else {}
+        else:
+            response_data = raw_data
+        
+        response = response_data.get("response", {})
+        individual_results = response.get("individualResults", [])
+        
+        logger.info(f"Processing {len(individual_results)} individual results")
+        
+        for idx, result in enumerate(individual_results):
+            original_result = result.get("originalResult", {})
+            results_list = original_result.get("results", [])
+            
+            for res_idx, res in enumerate(results_list):
+                data = res.get("data", {})
+                structured_data = data.get("structuredTextJsonData", {})
+                document = structured_data.get("document", {})
+                
+                # Extract from main document
+                extracted_items = extract_text_recursive(document, f"doc_{idx}_result_{res_idx}")
+                
+                # Add metadata
+                for item in extracted_items:
+                    item["result_index"] = idx
+                    item["url"] = result.get("url", "")
+                    item["success"] = result.get("success", False)
+                    item["processing_time"] = result.get("processing_time", 0)
+                
+                all_extracted.extend(extracted_items)
+        
+        logger.info(f"Extracted {len(all_extracted)} text segments")
+        
+        if not all_extracted:
+            logger.warning("No text content extracted from API response")
+            all_extracted = [{"title": "", "content": "", "path": "", "result_index": 0, 
+                            "url": "", "success": False, "processing_time": 0}]
+        
+        # Create DataFrame
+        df = pd.DataFrame(all_extracted)
+        
+        # Combine title and content into full_text for training
+        df["full_text"] = df.apply(
+            lambda row: f"{row.get('title', '')}\n{row.get('content', '')}".strip(), 
+            axis=1
+        )
+        
+        # Remove empty texts
+        df = df[df["full_text"].str.len() > 0].reset_index(drop=True)
+        
+        # Prepare text dataset (just the text for model training)
+        text_df = df[["full_text"]].copy()
+        
+        # Prepare metadata dataset
+        metadata_df = df[["result_index", "path", "url", "success", "processing_time"]].copy()
+        
+        # Save extracted text
+        os.makedirs(os.path.dirname(args.extracted_text) or ".", exist_ok=True)
+        with open(args.extracted_text, "wb") as f:
+            pickle.dump(text_df, f)
+        
+        logger.info(f"Saved {len(text_df)} text segments to {args.extracted_text}")
+        
+        # Save metadata
+        os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
+        with open(args.metadata, "wb") as f:
+            pickle.dump(metadata_df, f)
+        
+        logger.info(f"Saved metadata to {args.metadata}")
+        
+    args:
+      - --api_url
+      - {inputValue: api_url}
+      - --access_token
+      - {inputPath: access_token}
+      - --extracted_text
+      - {outputPath: extracted_text}
+      - --metadata
+      - {outputPath: metadata}
