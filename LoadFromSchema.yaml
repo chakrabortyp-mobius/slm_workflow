@@ -125,8 +125,7 @@ implementation:
 
         def clean_text(s):
             if not s:
-                return ""
-            s = re.sub(r'[\r\n\t]+', ' ', s)
+                return ''
             s = re.sub(r'\s+', ' ', s)
             return s.strip()
 
