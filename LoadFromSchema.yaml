@@ -8,12 +8,18 @@ outputs:
   - {name: metadata, type: Data}
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: python:3.9
     command:
       - sh
       - -c
       - |
-        python3 << 'ENDOFPYTHON'
+        python3 -m pip install --quiet requests pandas || \
+        python3 -m pip install --quiet requests pandas --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
         import argparse
         import os
         import json
@@ -22,7 +28,7 @@ implementation:
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
         import logging
-        import re
+        from typing import List, Dict, Any
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--api_url', type=str, required=True)
@@ -32,37 +38,45 @@ implementation:
         args = parser.parse_args()
 
         logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger("extractor")
+        logger = logging.getLogger("text_extractor")
 
-        token_arg = args.access_token.strip()
+        token_arg = (args.access_token or "").strip()
         if os.path.exists(token_arg):
-            with open(token_arg) as f:
+            with open(token_arg, 'r') as f:
                 access_token = f.read().strip()
+            logger.info("Read token from file")
         else:
             access_token = token_arg
+            logger.info("Using token string")
 
         if not access_token:
-            raise ValueError("Empty token")
+            raise ValueError("Access token is empty")
 
         session = requests.Session()
-        retries = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        retries = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
+        )
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
 
-        headers = {"Authorization": "Bearer " + access_token}
+        headers = {"Authorization": f"Bearer {access_token}"}
 
         try:
+            logger.info("Sending API request")
             resp = session.get(args.api_url, headers=headers, timeout=60)
             resp.raise_for_status()
             raw_data = resp.json()
-        except Exception as e:
-            logger.error("API failed: " + str(e))
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request failed: {e}")
             raise
 
-        CHILD_KEYS = ["subsections", "sections", "children", "items"]
-        TITLE_KEYS = ["title", "heading", "name"]
-        CONTENT_KEYS = ["content", "text", "body"]
+        CHILD_KEYS = ("subsections", "sections", "children", "items")
+        TITLE_KEYS = ("title", "heading", "name")
+        CONTENT_KEYS = ("content", "text", "body")
 
         def iter_children(node):
             for k in CHILD_KEYS:
@@ -73,12 +87,11 @@ implementation:
 
         def get_first(node, keys):
             for k in keys:
-                val = node.get(k)
-                if val:
-                    return str(val).strip()
+                if k in node and node[k]:
+                    return str(node[k]).strip()
             return ""
 
-        def extract_recursive(node, path=""):
+        def extract_text_recursive(node, path=""):
             results = []
             title = get_first(node, TITLE_KEYS)
             content = get_first(node, CONTENT_KEYS)
@@ -86,64 +99,62 @@ implementation:
                 results.append({"title": title, "content": content, "path": path})
             children = iter_children(node)
             for idx, child in enumerate(children):
-                subpath = path + "/sub_" + str(idx) if path else "sub_" + str(idx)
-                results.extend(extract_recursive(child, subpath))
+                sub_path = f"{path}/subsection_{idx}" if path else f"subsection_{idx}"
+                results.extend(extract_text_recursive(child, sub_path))
             return results
 
         all_rows = []
         response_items = raw_data if isinstance(raw_data, list) else [raw_data]
+        total_individual = 0
+        total_results = 0
 
         for resp_idx, response_data in enumerate(response_items):
-            response_obj = response_data.get("response", {}) if response_data else {}
+            response_obj = (response_data or {}).get("response", {})
             individual_results = response_obj.get("individualResults", [])
+            total_individual += len(individual_results)
+            logger.info(f"Processing {len(individual_results)} individual results")
 
             for ind_idx, result in enumerate(individual_results):
                 original_result = result.get("originalResult", {})
                 results_list = original_result.get("results", [])
+                total_results += len(results_list)
 
                 for res_idx, res in enumerate(results_list):
                     data = res.get("data", {})
                     structured_data = data.get("structuredTextJsonData", {})
                     document = structured_data.get("document", {})
-                    
-                    path_prefix = "r" + str(resp_idx) + "_i" + str(ind_idx) + "_s" + str(res_idx)
-                    extracted_items = extract_recursive(document, path_prefix)
-                    
+                    extracted_items = extract_text_recursive(document, f"resp_{resp_idx}_ind_{ind_idx}_res_{res_idx}")
                     for item in extracted_items:
-                        item["response_index"] = resp_idx
-                        item["individual_index"] = ind_idx
-                        item["result_index"] = ind_idx
-                        item["url"] = result.get("url", "")
-                        item["success"] = result.get("success", False)
-                    
+                        item.update({
+                            "response_index": resp_idx,
+                            "individual_index": ind_idx,
+                            "result_index": ind_idx,
+                            "result_inner_index": res_idx,
+                            "url": result.get("url", ""),
+                            "success": result.get("success", False),
+                            "processing_time": result.get("processing_time", 0)
+                        })
                     all_rows.extend(extracted_items)
 
-        logger.info("Extracted " + str(len(all_rows)) + " segments")
+        logger.info(f"Processed {len(response_items)} responses, extracted {len(all_rows)} segments")
 
-        if all_rows:
-            df = pd.DataFrame(all_rows)
-        else:
-            df = pd.DataFrame(columns=["title", "content"])
+        df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["title","content"])
 
-        def clean_text(s):
+        def normalize_linebreaks(s):
             if not s:
                 return ""
-            s = re.sub(r'[\r\n\t]+', ' ', s)
             s = re.sub(r'\s+', ' ', s)
             return s.strip()
 
-        def combine(row):
-            t = clean_text(row.get("title", ""))
-            c = clean_text(row.get("content", ""))
-            parts = []
-            if t:
-                parts.append(t)
-            if c:
-                parts.append(c)
+
+        def combine_row(row):
+            t = normalize_linebreaks(row.get('title') or '')
+            c = normalize_linebreaks(row.get('content') or '')
+            parts = [p for p in (t, c) if p]
             return " ".join(parts)
 
         if len(df) > 0:
-            df["full_text"] = df.apply(combine, axis=1)
+            df["full_text"] = df.apply(combine_row, axis=1)
             df = df[df["full_text"].str.len() > 0].reset_index(drop=True)
         else:
             df = pd.DataFrame({"full_text": []})
@@ -151,22 +162,22 @@ implementation:
         os.makedirs(os.path.dirname(args.extracted_text) or ".", exist_ok=True)
         with open(args.extracted_text, "w", encoding="utf-8") as f:
             for line in df["full_text"]:
-                f.write(line)
-                f.write("\n")
+                f.write(line + "\n")
 
         meta = {
             "source": "structured_document_api",
             "responses_processed": len(response_items),
-            "segments_exported": len(df),
+            "segments_exported": int(len(df)),
+            "output_file": args.extracted_text,
             "status": "success" if len(df) > 0 else "empty"
         }
-        
         os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
-        with open(args.metadata, "w") as f:
+        with open(args.metadata, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
-        logger.info("Done")
-        ENDOFPYTHON
+        logger.info(f"Wrote {len(df)} lines to {args.extracted_text}")
+        logger.info(f"Wrote metadata to {args.metadata}")
+    args:
       - --api_url
       - {inputValue: api_url}
       - --access_token
