@@ -161,13 +161,6 @@ implementation:
             for line in df["full_text"]:
                 f.write(line + "\n")
 
-        # meta = {
-        #     "source": "structured_document_api",
-        #     "responses_processed": len(response_items),
-        #     "segments_exported": int(len(df)),
-        #     "output_file": args.extracted_text,
-        #     "status": "success" if len(df) > 0 else "empty"
-        # }
         meta = {}
         os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
         with open(args.metadata, "w", encoding="utf-8") as f:
