@@ -153,8 +153,8 @@ implementation:
 
         meta = {}
         
-        os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
-        with open(args.metadata, "w") as f:
+        os.makedirs(os.path.dirname(args.metadata) or '.', exist_ok=True)
+        with open(args.metadata, 'w') as f:
             json.dump(meta, f, indent=2)
 
         logger.info("Done")
