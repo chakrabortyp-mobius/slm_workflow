@@ -1,8 +1,8 @@
 name: Load and extract text from structured document API
-description: Fetches nested JSON from API and extracts all content and titles for model training (newline-delimited text output)
+description: Fetches nested JSON from API and extracts all content and titles for model training
 inputs:
   - {name: api_url, type: String, description: 'API URL to fetch structured document JSON'}
-  - {name: access_token, type: String, description: 'Bearer access token for API auth (string or filepath)'}
+  - {name: access_token, type: String, description: 'Bearer access token for API auth'}
 outputs:
   - {name: extracted_text, type: Data}
   - {name: metadata, type: Data}
@@ -28,110 +28,80 @@ implementation:
         import logging
         from typing import List, Dict, Any
 
-        # -------------------------
-        # Args
-        # -------------------------
         parser = argparse.ArgumentParser()
-        parser.add_argument('--api_url', type=str, required=True, help='API URL to fetch document JSON')
-        parser.add_argument('--access_token', type=str, required=True, help='Bearer token STRING or PATH to file containing token')
-        parser.add_argument('--extracted_text', type=str, required=True, help='Path to output newline-delimited text file')
-        parser.add_argument('--metadata', type=str, required=True, help='Path to output metadata JSON')
+        parser.add_argument('--api_url', type=str, required=True)
+        parser.add_argument('--access_token', type=str, required=True)
+        parser.add_argument('--extracted_text', type=str, required=True)
+        parser.add_argument('--metadata', type=str, required=True)
         args = parser.parse_args()
 
-        # -------------------------
-        # Logging
-        # -------------------------
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger("text_extractor")
 
-        # -------------------------
-        # Access token: accept string or filepath
-        # -------------------------
         token_arg = (args.access_token or "").strip()
         if os.path.exists(token_arg):
             with open(token_arg, 'r') as f:
                 access_token = f.read().strip()
-            logger.info("Read access token from file path provided.")
+            logger.info("Read token from file")
         else:
             access_token = token_arg
-            logger.info("Using access token provided directly as a string.")
+            logger.info("Using token string")
 
         if not access_token:
-            raise ValueError("Access token is empty. Provide a token string or a path to a file containing the token.")
+            raise ValueError("Access token is empty")
 
-        # -------------------------
-        # HTTP session with robust retries (includes 429)
-        # -------------------------
         session = requests.Session()
         retries = Retry(
             total=5,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods={"GET", "POST"},
-            raise_on_status=False,
+            allowed_methods=["GET", "POST"]
         )
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
 
-        headers = {
-            "Authorization": f"Bearer {access_token}"
-        }
+        headers = {"Authorization": f"Bearer {access_token}"}
 
-        # -------------------------
-        # Fetch data
-        # -------------------------
         try:
-            logger.info("Sending request to API with retries enabled")
+            logger.info("Sending API request")
             resp = session.get(args.api_url, headers=headers, timeout=60)
             resp.raise_for_status()
             raw_data = resp.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed after retries: {e}")
+            logger.error(f"API request failed: {e}")
             raise
 
-        # -------------------------
-        # Flexible traversal helpers
-        # -------------------------
         CHILD_KEYS = ("subsections", "sections", "children", "items")
         TITLE_KEYS = ("title", "heading", "name")
         CONTENT_KEYS = ("content", "text", "body")
 
-        def iter_children(node: Dict[str, Any]):
+        def iter_children(node):
             for k in CHILD_KEYS:
                 v = node.get(k)
                 if isinstance(v, list):
                     return v
             return []
 
-        def get_first(node: Dict[str, Any], keys) -> str:
+        def get_first(node, keys):
             for k in keys:
                 if k in node and node[k]:
                     return str(node[k]).strip()
             return ""
 
-        def extract_text_recursive(node: Dict[str, Any], path: str = "") -> List[Dict[str, str]]:
-           
+        def extract_text_recursive(node, path=""):
             results = []
-
             title = get_first(node, TITLE_KEYS)
             content = get_first(node, CONTENT_KEYS)
-
             if title or content:
                 results.append({"title": title, "content": content, "path": path})
-
             children = iter_children(node)
             for idx, child in enumerate(children):
                 sub_path = f"{path}/subsection_{idx}" if path else f"subsection_{idx}"
                 results.extend(extract_text_recursive(child, sub_path))
-
             return results
 
-        # -------------------------
-        # Process ALL top-level responses (list or single object)
-        # -------------------------
-        all_rows: List[Dict[str, Any]] = []
-
+        all_rows = []
         response_items = raw_data if isinstance(raw_data, list) else [raw_data]
         total_individual = 0
         total_results = 0
@@ -140,7 +110,7 @@ implementation:
             response_obj = (response_data or {}).get("response", {})
             individual_results = response_obj.get("individualResults", [])
             total_individual += len(individual_results)
-            logger.info(f"[response {resp_idx}] Processing {len(individual_results)} individual results")
+            logger.info(f"Processing {len(individual_results)} individual results")
 
             for ind_idx, result in enumerate(individual_results):
                 original_result = result.get("originalResult", {})
@@ -151,56 +121,41 @@ implementation:
                     data = res.get("data", {})
                     structured_data = data.get("structuredTextJsonData", {})
                     document = structured_data.get("document", {})
-
-                    extracted_items = extract_text_recursive(
-                        document, f"resp_{resp_idx}_ind_{ind_idx}_res_{res_idx}"
-                    )
-
+                    extracted_items = extract_text_recursive(document, f"resp_{resp_idx}_ind_{ind_idx}_res_{res_idx}")
                     for item in extracted_items:
                         item.update({
                             "response_index": resp_idx,
                             "individual_index": ind_idx,
-                            "result_index": ind_idx,         # kept for backward compatibility
+                            "result_index": ind_idx,
                             "result_inner_index": res_idx,
                             "url": result.get("url", ""),
                             "success": result.get("success", False),
-                            "processing_time": result.get("processing_time", 0),
+                            "processing_time": result.get("processing_time", 0)
                         })
                     all_rows.extend(extracted_items)
 
-        logger.info(
-            f"Processed {len(response_items)} top-level responses, "
-            f"{total_individual} individual results, {total_results} inner results; "
-            f"extracted {len(all_rows)} segments."
-        )
+        logger.info(f"Processed {len(response_items)} responses, extracted {len(all_rows)} segments")
 
-        # -------------------------
-        # Build DataFrame then render exporter-style lines
-        # -------------------------
         df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["title","content"])
 
-        def normalize_linebreaks(s: str) -> str:
-            if not s: return ""
-            s = s.replace("\\r\\n", "\\n").replace("\\r", "\\n")
-            return s.replace("\\n", " ")
+        def normalize_linebreaks(s):
+            if not s:
+                return ""
+            s = s.replace("\r\n", "\n").replace("\r", "\n")
+            return s.replace("\n", " ")
 
-        def combine_row_exporter(row):
+        def combine_row(row):
             t = normalize_linebreaks((row.get('title') or '').strip())
             c = normalize_linebreaks((row.get('content') or '').strip())
             parts = [p for p in (t, c) if p]
             return " ".join(parts).strip()
 
         if len(df) > 0:
-            df["full_text"] = df.apply(combine_row_exporter, axis=1)
+            df["full_text"] = df.apply(combine_row, axis=1)
             df = df[df["full_text"].str.len() > 0].reset_index(drop=True)
         else:
             df = pd.DataFrame({"full_text": []})
 
-        # -------------------------
-        # WRITE OUTPUTS
-        #   1) extracted_text: newline-delimited plain text (same style as Dataset Text Exporter1)
-        #   2) metadata: JSON with simple run info
-        # -------------------------
         os.makedirs(os.path.dirname(args.extracted_text) or ".", exist_ok=True)
         with open(args.extracted_text, "w", encoding="utf-8") as f:
             for line in df["full_text"]:
@@ -211,8 +166,6 @@ implementation:
             "responses_processed": len(response_items),
             "segments_exported": int(len(df)),
             "output_file": args.extracted_text,
-            "join_separator": " ",
-            "line_separator": "\\n",
             "status": "success" if len(df) > 0 else "empty"
         }
         os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
@@ -220,7 +173,7 @@ implementation:
             json.dump(meta, f, indent=2)
 
         logger.info(f"Wrote {len(df)} lines to {args.extracted_text}")
-        logger.info(f"Wrote metadata JSON to {args.metadata}")
+        logger.info(f"Wrote metadata to {args.metadata}")
     args:
       - --api_url
       - {inputValue: api_url}
