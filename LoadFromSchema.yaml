@@ -163,7 +163,7 @@ implementation:
                 f.write(line + '\n')
 
         meta = {}
-        os.makedirs(os.path.dirname(args.metadata) or '.', exist_ok=True)
+        os.makedirs(os.path.dirname(args.metadata) or ".", exist_ok=True)
         with open(args.metadata, 'w', encoding='utf-8') as f:
             json.dump(meta, f, indent=2)
 
