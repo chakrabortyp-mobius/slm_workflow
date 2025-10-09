@@ -141,8 +141,8 @@ implementation:
         def normalize_linebreaks(s):
             if not s:
                 return ""
-            s = s.replace("\r\n", "\n").replace("\r", "\n")
-            return s.replace("\n", " ")
+            s = re.sub(r'\s+', ' ', s)
+            return s.strip()
 
         def combine_row(row):
             t = normalize_linebreaks((row.get('title') or '').strip())
