@@ -157,7 +157,7 @@ implementation:
         with open(args.metadata, 'w') as f:
             json.dump(meta, f, indent=2)
 
-        logger.info("Done")
+        logger.info('Done')
       - --api_url
       - {inputValue: api_url}
       - --access_token
