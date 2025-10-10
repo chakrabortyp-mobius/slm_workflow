@@ -1,0 +1,89 @@
+name: MinIO to Gemma3 Artifacts
+description: Download Gemma3 artifacts (tokenizer_json, model_py, model_config, model_weights) from MinIO (same source path used by the uploader).
+
+inputs:
+  - {name: bucket,     type: String, description: "MinIO bucket"}
+  - {name: app_name,   type: String, description: "Application namespace under bucket"}
+  - {name: model_name, type: String, description: "Model name (directory under app_name)"}
+  - {name: version,    type: String, description: "Model version (directory under model_name)"}
+
+outputs:
+  - {name: tokenizer_json, type: Model, description: "tokenizer.json from MinIO"}
+  - {name: model_py,       type: Data,  description: "model.py from MinIO"}
+  - {name: model_config,   type: Data,  description: "config.json from MinIO"}
+  - {name: model_weights,  type: Model, description: "best_weights.(pth|pt) from MinIO"}
+
+metadata:
+  annotations:
+    author: probir <chakraborty.p@mobiusdtaas.ai>
+
+implementation:
+  container:
+    image: ubuntu:22.04
+    command:
+    - sh
+    - -ex
+    - -c
+    - |
+      # Install wget and MinIO client (mc)
+      apt-get -o Acquire::ForceIPv4=true update
+      apt-get -o Acquire::ForceIPv4=true install -y wget ca-certificates
+      wget https://dl.min.io/client/mc/release/linux-amd64/mc
+      chmod +x mc
+      mv mc /usr/local/bin/
+
+      # Configure MinIO alias (same as uploader)
+      mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 minio 7X3FWSYK6NDQGOOGL9KGUTOIYVFCYI
+
+      # Read inputs (positional, following `-c` semantics)
+      BUCKET="$0"
+      APP="$1"
+      NAME="$2"
+      VERSION="$3"
+      OUT_TOKENIZER="$4"
+      OUT_MODEL_PY="$5"
+      OUT_CONFIG_JSON="$6"
+      OUT_WEIGHTS="$7"
+
+      # Validate inputs
+      [ -z "$BUCKET" ]  && { echo "bucket is required" >&2; exit 1; }
+      [ -z "$APP" ]     && { echo "app_name is required" >&2; exit 1; }
+      [ -z "$NAME" ]    && { echo "model_name is required" >&2; exit 1; }
+      [ -z "$VERSION" ] && { echo "version is required" >&2; exit 1; }
+
+      SRC="myminio/$BUCKET/$APP/$NAME/$VERSION"
+
+      # Ensure source exists
+      mc ls "$SRC/" >/dev/null 2>&1 || { echo "Source not found: s3://$BUCKET/$APP/$NAME/$VERSION/" >&2; exit 1; }
+
+      # Prepare output dirs
+      mkdir -p "$(dirname "$OUT_TOKENIZER")" "$(dirname "$OUT_MODEL_PY")" "$(dirname "$OUT_CONFIG_JSON")" "$(dirname "$OUT_WEIGHTS")"
+
+      # Download required files
+      mc cp "$SRC/tokenizer.json" "$OUT_TOKENIZER" || { echo "Missing tokenizer.json in $SRC/" >&2; exit 1; }
+      mc cp "$SRC/model.py"       "$OUT_MODEL_PY"  || { echo "Missing model.py in $SRC/" >&2; exit 1; }
+      mc cp "$SRC/config.json"    "$OUT_CONFIG_JSON" || { echo "Missing config.json in $SRC/" >&2; exit 1; }
+
+      # Download weights (supports either .pth or .pt as produced by the uploader)
+      if mc stat "$SRC/best_weights.pth" >/dev/null 2>&1; then
+        mc cp "$SRC/best_weights.pth" "$OUT_WEIGHTS"
+      elif mc stat "$SRC/best_weights.pt" >/dev/null 2>&1; then
+        mc cp "$SRC/best_weights.pt" "$OUT_WEIGHTS"
+      else
+        echo "Missing best_weights.pth or best_weights.pt in $SRC/" >&2
+        exit 1
+      fi
+
+      # Basic integrity checks
+      [ -s "$OUT_TOKENIZER" ] || { echo "Downloaded tokenizer_json is empty" >&2; exit 1; }
+      [ -s "$OUT_MODEL_PY" ]  || { echo "Downloaded model_py is empty" >&2; exit 1; }
+      [ -s "$OUT_CONFIG_JSON" ] || { echo "Downloaded model_config is empty" >&2; exit 1; }
+      [ -s "$OUT_WEIGHTS" ]   || { echo "Downloaded model_weights is empty" >&2; exit 1; }
+    - inputValue: bucket
+    - inputValue: app_name
+    - inputValue: model_name
+    - inputValue: version
+    - outputPath: tokenizer_json
+    - outputPath: model_py
+    - outputPath: model_config
+    - outputPath: model_weights
