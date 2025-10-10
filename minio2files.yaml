@@ -33,7 +33,7 @@ implementation:
       mv mc /usr/local/bin/
 
       # Configure MinIO alias (same as uploader)
-      mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 minio 7X3FWSYK6NDQGOOGL9KGUTOIYVFCYI
+      mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 minio K7712XV0U4HRXJOCL8JJFPBVUNFNZL
 
       # Read inputs (positional, following `-c` semantics)
       BUCKET="$0"
