@@ -10,7 +10,7 @@ outputs:
     description: "Text data fetched from the CDN URL."
 implementation:
   container:
-    image: python:3.9
+    image: nikhilv215/nesy-factory:v22
     command:
       - sh
       - -c
