@@ -1,0 +1,55 @@
+name: Get data through CDN (Text)
+description: Downloads text data from a CDN URL and saves it.
+inputs:
+  - name: process_data_url
+    type: String
+    description: URL to fetch the text data from.
+outputs:
+  - name: processed_data
+    type: Data
+    description: "Text data fetched from the CDN URL."
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import requests
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--process_data_url', type=str, required=True)
+        parser.add_argument('--processed_data', type=str, required=True)
+        args = parser.parse_args()
+
+        # URL to fetch data from
+        data_url = args.process_data_url
+
+        print(f"Fetching text data from CDN: {data_url}")
+        
+        # Step 1: Download text data from CDN
+        resp = requests.get(data_url)
+        resp.raise_for_status()
+
+        os.makedirs(os.path.dirname(args.processed_data), exist_ok=True)
+
+        # Write the content to the output file
+        with open(args.processed_data, "w", encoding="utf-8") as f:
+            f.write(resp.text)
+        
+        print(f"Text data saved at {args.processed_data}")
+        
+    args:
+      - --process_data_url
+      - {inputValue: process_data_url}
+      - --processed_data
+      - {outputPath: processed_data}
