@@ -73,16 +73,13 @@ outputs:
 
 implementation:
   container:
-    image: python:3.9
+    image: nikhilv215/nesy-factory:v22
     command:
       - python3
       - -u
       - -c
       - |-
         import subprocess, sys
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
-                        "torch>=2.2", "tokenizers", "datasets", "tqdm", "numpy"], check=True)
-
         import os, json, math, argparse, numpy as np, shutil, importlib.util, torch
         import torch.nn.functional as F
         from contextlib import nullcontext
