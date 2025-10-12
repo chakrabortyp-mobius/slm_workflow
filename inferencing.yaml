@@ -2,26 +2,38 @@ name: Run Gemma3 Inference
 description: Loads Gemma3Model and generates text for a prompt with minimal logging
 inputs:
   - name: tokenizer_json
-    type: Model
+    type: Data
+    description: Path to tokenizer JSON file
   - name: model_py
     type: Data
+    description: Path to model Python code file
   - name: model_config
     type: Data
+    description: Path to model config JSON file
   - name: learned_weights
-    type: Model
+    type: Data
+    description: Path to learned model weights file
   - name: prompt
     type: String
     default: "the girl"
+    description: Text prompt for generation
   - name: max_new_tokens
     type: Integer
     default: "64"
+    description: Maximum number of tokens to generate
 outputs:
   - name: generated_text
     type: Data
+    description: Generated text output
 implementation:
   container:
     image: nikhilv215/nesy-factory:v22
     command:
+      - sh
+      - -c
+      - |
+        set -e
+        exec "$0" "$@"
       - python3
       - -u
       - -c
@@ -35,15 +47,15 @@ implementation:
             spec.loader.exec_module(module)
             return module
 
-        ap = argparse.ArgumentParser()
-        ap.add_argument("--tokenizer-json", required=True)
-        ap.add_argument("--model-py", required=True)
-        ap.add_argument("--model-config", required=True)
-        ap.add_argument("--weights", required=True)
-        ap.add_argument("--prompt", required=True)
-        ap.add_argument("--max-new-tokens", type=int, default=64)
-        ap.add_argument("--gen-out", required=True)
-        args = ap.parse_args()
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--tokenizer_json", type=str, required=True)
+        parser.add_argument("--model_py", type=str, required=True)
+        parser.add_argument("--model_config", type=str, required=True)
+        parser.add_argument("--learned_weights", type=str, required=True)
+        parser.add_argument("--prompt", type=str, required=True)
+        parser.add_argument("--max_new_tokens", type=int, default=64)
+        parser.add_argument("--generated_text", type=str, required=True)
+        args = parser.parse_args()
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_device = torch.device(device)
@@ -61,7 +73,7 @@ implementation:
         Gemma3Model = getattr(mod, "Gemma3Model")
 
         model = Gemma3Model(cfg).to(torch_device)
-        state = torch.load(args.weights, map_location=torch_device)
+        state = torch.load(args.learned_weights, map_location=torch_device)
         model.load_state_dict(state, strict=True)
         model.eval()
 
@@ -92,21 +104,23 @@ implementation:
         out_text = generate_text(args.prompt, args.max_new_tokens)
         print(out_text)
 
-        os.makedirs(os.path.dirname(args.gen_out) or ".", exist_ok=True)
-        with open(args.gen_out, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(args.generated_text), exist_ok=True)
+        with open(args.generated_text, "w", encoding="utf-8") as f:
             f.write(out_text)
-  args:
-    - --tokenizer-json
-    - {inputPath: tokenizer_json}
-    - --model-py
-    - {inputPath: model_py}
-    - --model-config
-    - {inputPath: model_config}
-    - --weights
-    - {inputPath: learned_weights}
-    - --prompt
-    - {inputValue: prompt}
-    - --max-new-tokens
-    - {inputValue: max_new_tokens}
-    - --gen-out
-    - {outputPath: generated_text}
+
+        print(f"Generated text saved at {args.generated_text}")
+    args:
+      - --tokenizer_json
+      - {inputPath: tokenizer_json}
+      - --model_py
+      - {inputPath: model_py}
+      - --model_config
+      - {inputPath: model_config}
+      - --learned_weights
+      - {inputPath: learned_weights}
+      - --prompt
+      - {inputValue: prompt}
+      - --max_new_tokens
+      - {inputValue: max_new_tokens}
+      - --generated_text
+      - {outputPath: generated_text}
