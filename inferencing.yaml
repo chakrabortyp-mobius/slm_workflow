@@ -1,4 +1,4 @@
-name: Run Gemma3 Inference 1816
+name: Run Gemma3 Inference
 description: Loads Gemma3Model from model code + JSON config + learned weights + tokenizer and generates text for a prompt. Prints the output to logs (f-strings with [INFO]/[OUTPUT]).
 inputs:
   - name: tokenizer_json
