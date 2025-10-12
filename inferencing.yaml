@@ -38,11 +38,38 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, importlib.util, json, os, torch
+        import argparse, importlib.util, json, os, torch, shutil
         from tokenizers import Tokenizer
 
+        def find_model_py_file(directory):
+            print(f"[DEBUG] Searching for .py file in: {directory}")
+            if os.path.isfile(directory):
+                print(f"[DEBUG] Path is already a file: {directory}")
+                return directory
+            if not os.path.isdir(directory):
+                raise ValueError(f"Path {directory} is neither a file nor a directory")
+            print(f"[DEBUG] Directory contents: {os.listdir(directory)}")
+            py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".py")]
+            if not py_files:
+                raise FileNotFoundError(f"No .py file found in directory {directory}")
+            if len(py_files) > 1:
+                print(f"[WARN] Multiple .py files found, using first: {py_files[0]}")
+            print(f"[DEBUG] Selected .py file: {py_files[0]}")
+            return py_files[0]
+
         def load_module_from_path(py_path, mod_name="gemma3_model"):
+            if not py_path.endswith('.py'):
+                print(f"[DEBUG] File {py_path} doesn't have .py extension, creating temporary .py file")
+                temp_py_path = py_path + '.py'
+                import shutil
+                shutil.copyfile(py_path, temp_py_path)
+                py_path = temp_py_path
+                print(f"[DEBUG] Created temporary file: {py_path}")
+            if not os.path.exists(py_path):
+                raise FileNotFoundError(f"Model file not found: {py_path}")
             spec = importlib.util.spec_from_file_location(mod_name, py_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Cannot load module from: {py_path}")
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
@@ -56,6 +83,14 @@ implementation:
         parser.add_argument("--max_new_tokens", type=int, default=64)
         parser.add_argument("--generated_text", type=str, required=True)
         args = parser.parse_args()
+        
+        print(f"Checking input files...")
+        print(f"  tokenizer_json: {args.tokenizer_json} (exists: {os.path.exists(args.tokenizer_json)})")
+        print(f"  model_py: {args.model_py} (exists: {os.path.exists(args.model_py)})")
+        print(f"  model_config: {args.model_config} (exists: {os.path.exists(args.model_config)})")
+        print(f"  learned_weights: {args.learned_weights} (exists: {os.path.exists(args.learned_weights)})")
+        
+        os.makedirs(os.path.dirname(args.generated_text) or ".", exist_ok=True)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_device = torch.device(device)
@@ -69,7 +104,10 @@ implementation:
             cfg = json.load(f)
         cfg["dtype"] = model_dtype
 
-        mod = load_module_from_path(args.model_py, "gemma3_model")
+        print(f"Finding model .py file...")
+        model_py_path = find_model_py_file(args.model_py)
+        print(f"Loading model code from: {model_py_path}")
+        mod = load_module_from_path(model_py_path, "gemma3_model")
         Gemma3Model = getattr(mod, "Gemma3Model")
 
         model = Gemma3Model(cfg).to(torch_device)
@@ -104,7 +142,6 @@ implementation:
         out_text = generate_text(args.prompt, args.max_new_tokens)
         print(out_text)
 
-        os.makedirs(os.path.dirname(args.generated_text), exist_ok=True)
         with open(args.generated_text, "w", encoding="utf-8") as f:
             f.write(out_text)
 
