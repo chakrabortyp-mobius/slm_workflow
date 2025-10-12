@@ -1,0 +1,139 @@
+name: Run Gemma3 Inference 1816
+description: Loads Gemma3Model from model code + JSON config + learned weights + tokenizer and generates text for a prompt. Prints the output to logs (f-strings with [INFO]/[OUTPUT]).
+inputs:
+  - name: tokenizer_json
+    type: Model
+  - name: model_py
+    type: Data
+  - name: model_config
+    type: Data
+  - name: learned_weights
+    type: Model
+  - name: prompt
+    type: String
+    default: "the girl"
+  - name: max_new_tokens
+    type: Integer
+    default: "64"
+outputs:
+  - name: generated_text
+    type: Data
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, importlib.util, json, os, sys, torch
+        from tokenizers import Tokenizer
+
+        def load_module_from_path(py_path, mod_name="gemma3_model"):
+            spec = importlib.util.spec_from_file_location(mod_name, py_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--tokenizer-json", required=True)
+            ap.add_argument("--model-py", required=True)
+            ap.add_argument("--model-config", required=True)
+            ap.add_argument("--weights", required=True)
+            ap.add_argument("--prompt", required=True)
+            ap.add_argument("--max-new-tokens", type=int, default=64)
+            ap.add_argument("--gen-out", required=True)
+            args = ap.parse_args()
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            torch_device = torch.device(device)
+            model_dtype = torch.float16 if device == "cuda" else torch.float32
+
+            # print(f"[INFO] Device={device}, dtype={model_dtype}")
+
+            # Load tokenizer
+            # print(f"[INFO] Loading tokenizer from {args.tokenizer_json}")
+            tok = Tokenizer.from_file(args.tokenizer_json)
+            bos_id = tok.token_to_id("<s>") or tok.token_to_id("<bos>")
+            eos_id = tok.token_to_id("</s>") or tok.token_to_id("<eos>")
+
+            # Load config and coerce dtype
+            print(f"[INFO] Loading model config from {args.model_config}")
+            with open(args.model_config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg["dtype"] = model_dtype  # from saved string to torch dtype
+
+            # Dynamically import model code
+            # print(f"[INFO] Importing model code from {args.model_py}")
+            mod = load_module_from_path(args.model_py, "gemma3_model")
+            Gemma3Model = getattr(mod, "Gemma3Model")
+
+            # Build model and load weights
+            # print(f"[INFO] Building model (vocab_size={cfg.get('vocab_size')}, emb_dim={cfg.get('emb_dim')}, n_layers={cfg.get('n_layers')}, n_heads={cfg.get('n_heads')})")
+            model = Gemma3Model(cfg).to(torch_device)
+
+            print(f"[INFO] Loading weights from {args.weights}")
+            state = torch.load(args.weights, map_location=torch_device)
+            model.load_state_dict(state, strict=True)
+            model.eval()
+            # print(f"[INFO] Weights loaded successfully")
+
+            context_len = int(cfg.get("context_length", 2048))
+            # print(f"[INFO] Ready (context_length={context_len}, sliding_window={cfg.get('sliding_window')})")
+            print(f"[INFO] Prompt: {args.prompt!r}")
+            # print(f"[INFO] Max new tokens: {args.max_new_tokens}")
+
+            # Simple greedy generation (no cache)
+            def generate_text(prompt: str, max_new_tokens: int = 64):
+                ids = tok.encode(prompt).ids
+                if bos_id is not None:
+                    ids = [bos_id] + ids
+                x = torch.tensor([ids], dtype=torch.long, device=torch_device)
+
+                for step in range(max_new_tokens):
+                    with torch.no_grad():
+                        logits, *_ = model(x)  # (logits, loss=None)
+                    next_id = int(torch.argmax(logits[0, -1]).item())
+                    ids.append(next_id)
+
+                    if eos_id is not None and next_id == eos_id:
+                        print(f"[INFO] Reached EOS at step {step+1}")
+                        break
+
+                    # keep within context window
+                    if len(ids) > context_len:
+                        ids = ids[-context_len:]
+                    x = torch.tensor([ids], dtype=torch.long, device=torch_device)
+
+                # drop leading BOS for decoding if present
+                dec_ids = ids[1:] if (bos_id is not None and len(ids) and ids[0] == bos_id) else ids
+                return tok.decode(dec_ids)
+
+            out_text = generate_text(args.prompt, args.max_new_tokens)
+
+            print(f"[OUTPUT] {out_text}")
+
+            # Write to file output for downstream bricks
+            os.makedirs(os.path.dirname(args.gen_out) or ".", exist_ok=True)
+            with open(args.gen_out, "w", encoding="utf-8") as f:
+                f.write(out_text)
+            print(f"[INFO] Generation saved to {args.gen_out}")
+
+        if __name__ == "__main__":
+            main()
+  args:
+    - --tokenizer-json
+    - {inputPath: tokenizer_json}
+    - --model-py
+    - {inputPath: model_py}
+    - --model-config
+    - {inputPath: model_config}
+    - --weights
+    - {inputPath: learned_weights}
+    - --prompt
+    - {inputValue: prompt}
+    - --max-new-tokens
+    - {inputValue: max_new_tokens}
+    - --gen-out
+    - {outputPath: generated_text}
