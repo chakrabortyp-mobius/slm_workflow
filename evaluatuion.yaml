@@ -31,12 +31,10 @@ implementation:
   container:
     image: nikhilv215/nesy-factory:v22
     command:
-      - bash
-      - -ec
+      - python3
+      - -u
+      - -c
       - |-
-        set -o pipefail
-
-        python3 -u - <<'PY'
         import subprocess, sys
         pkgs = ["mlflow", "rouge-score", "nltk", "pandas"]
         for p in pkgs:
@@ -374,7 +372,6 @@ implementation:
 
         if __name__ == "__main__":
             main()
-        PY
     args:
       - --model-py
       - {inputPath: model_py}
