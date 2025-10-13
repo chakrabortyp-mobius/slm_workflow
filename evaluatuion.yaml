@@ -366,6 +366,7 @@ implementation:
                     "ground_truth": eval_df["ground_truth"],
                     "prediction": preds
                 })
+                os.makedirs(os.path.dirname(args.results_csv) or ".", exist_ok=True)
                 results_df.to_csv(args.results_csv, index=False)
                 mlflow.log_artifact(args.results_csv)
                 print(f"[INFO] Results saved to {args.results_csv}")
