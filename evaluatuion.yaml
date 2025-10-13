@@ -370,12 +370,7 @@ implementation:
                     json.dump(kfp_metrics, f, indent=2)
                 print(f"[INFO] KFP metrics saved to {args.metrics_json}")
 
-                # Print final metrics
-                # print("\n" + "="*50)
-                # print("EVALUATION RESULTS")
-                # print("="*50)
-                # print(json.dumps(scalar_metrics, indent=4))
-                # print("="*50)
+
 
         if __name__ == "__main__":
             main()
