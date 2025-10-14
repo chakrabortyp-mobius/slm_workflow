@@ -1,33 +1,33 @@
 name: Run Gemma3 Inference with Scoring
 description: Loads Gemma3Model, generates text for multiple input-output pairs, and calculates ROUGE and BLEU scores
 inputs:
-  - name: tokenizer_json
-    type: Model
+`- name: tokenizer_json
+    type: Model 
     description: Path to tokenizer JSON file
-  - name: model_py
+- name: model_py
     type: Data
     description: Path to model Python code file
-  - name: model_config
+- name: model_config
     type: Data
     description: Path to model config JSON file
-  - name: learned_weights
+- name: learned_weights
     type: Model
     description: Path to learned model weights file
-  - name: test_data_json
+- name: test_data_json
     type: String
     description: JSON string containing list of [input, expected_output] pairs
-  - name: max_new_tokens
+- name: max_new_tokens
     type: Integer
     default: "64"
     description: Maximum number of tokens to generate
-  - name: temperature
+- name: temperature
     type: Float
     default: "1.0"
     description: Sampling temperature (higher = more random, lower = more deterministic)
-  - name: top_k
+- name: top_k
     type: Integer
     default: "50"
-    description: Number of top tokens to sample from (top-k sampling)
+    description: Number of top tokens to sample from (top-k sampling)`
 outputs:
   - name: inference_results
     type: Data
@@ -138,7 +138,9 @@ implementation:
 
             for _ in range(max_new_tokens):
                 with torch.no_grad():
-                    logits = model(x)[0, -1]  # Get the last token logits
+                    # Ensure we're getting the correct part of the model output
+                    model_output = model(x)
+                    logits = model_output[0, -1]  # Assuming the first element is logits
 
                 # Apply temperature scaling
                 logits = logits / temperature
@@ -166,6 +168,7 @@ implementation:
 
             dec_ids = ids[1:] if (bos_id is not None and len(ids) and ids[0] == bos_id) else ids
             return tok.decode(dec_ids)
+
 
         # Parse test data
         test_data = json.loads(args.test_data_json)
@@ -202,17 +205,17 @@ implementation:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
 
     args:
-      - --tokenizer_json
-      - {inputPath: tokenizer_json}
-      - --model_py
-      - {inputPath: model_py}
-      - --model_config
-      - {inputPath: model_config}
-      - --learned_weights
-      - {inputPath: learned_weights}
-      - --test_data_json
-      - {inputValue: test_data_json}
-      - --max_new_tokens
-      - {inputValue: max_new_tokens}
-      - --inference_results
-      - {outputPath: inference_results}
+        - --tokenizer_json
+        - {inputPath: tokenizer_json}
+        - --model_py
+        - {inputPath: model_py}
+        - --model_config
+        - {inputPath: model_config}
+        - --learned_weights
+        - {inputPath: learned_weights}
+        - --test_data_json
+        - {inputValue: test_data_json}
+        - --max_new_tokens
+        - {inputValue: max_new_tokens}
+        - --inference_results
+        - {outputPath: inference_results}
