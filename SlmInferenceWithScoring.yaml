@@ -133,7 +133,7 @@ implementation:
 
             for _ in range(max_new_tokens):
                 with torch.no_grad():
-                    model_output = model(x)
+                    model_output = model(x)[0]
                     logits = model_output[0, -1]
 
                 logits = logits / temperature
