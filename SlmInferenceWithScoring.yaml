@@ -173,20 +173,19 @@ implementation:
             bleu_score = bleu_metric.sentence_score(generated_output, [expected_output]).score / 100.0
             
             result = {
-                "input": input_text,
-                "expected_output": expected_output,
-                "generated_output": generated_output,
-                "rouge_score": round(rouge_score, 4),
-                "bleu_score": round(bleu_score, 4)
+                "infernce_input": input_text,
+                "infernce_output": generated_output,
+                "inference_score_rouge": round(rouge_score, 4),
+                "infernce_score_blue": round(bleu_score, 4)
             }
             results.append(result)
             
             print(f"  Generated: {generated_output[:100]}...")
             print(f"  ROUGE: {rouge_score:.4f}, BLEU: {bleu_score:.4f}")
 
-        output_data = {"results": results}
+        # output_data = {"results": results}
         with open(args.inference_results, "w", encoding="utf-8") as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
+            json.dump(results, f, indent=2, ensure_ascii=False)
 
 
     args:
