@@ -1,0 +1,200 @@
+name: Run Gemma3 Inference with Scoring
+description: Loads Gemma3Model, generates text for multiple input-output pairs, and calculates ROUGE and BLEU scores
+inputs:
+  - name: tokenizer_json
+    type: Model
+    description: Path to tokenizer JSON file
+  - name: model_py
+    type: Data
+    description: Path to model Python code file
+  - name: model_config
+    type: Data
+    description: Path to model config JSON file
+  - name: learned_weights
+    type: Model
+    description: Path to learned model weights file
+  - name: test_data_json
+    type: String
+    description: JSON string containing list of [input, expected_output] pairs
+  - name: max_new_tokens
+    type: Integer
+    default: "64"
+    description: Maximum number of tokens to generate
+outputs:
+  - name: inference_results
+    type: Data
+    description: JSON file with all inference results and scores
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        pip install rouge-score sacrebleu
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, importlib.util, json, os, torch, shutil
+        from tokenizers import Tokenizer
+        from rouge_score import rouge_scorer
+        from sacrebleu.metrics import BLEU
+
+        def find_model_py_file(directory):
+            print(f"[DEBUG] Searching for .py file in: {directory}")
+            if os.path.isfile(directory):
+                print(f"[DEBUG] Path is already a file: {directory}")
+                return directory
+            if not os.path.isdir(directory):
+                raise ValueError(f"Path {directory} is neither a file nor a directory")
+            print(f"[DEBUG] Directory contents: {os.listdir(directory)}")
+            py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".py")]
+            if not py_files:
+                raise FileNotFoundError(f"No .py file found in directory {directory}")
+            if len(py_files) > 1:
+                print(f"[WARN] Multiple .py files found, using first: {py_files[0]}")
+            print(f"[DEBUG] Selected .py file: {py_files[0]}")
+            return py_files[0]
+
+        def load_module_from_path(py_path, mod_name="gemma3_model"):
+            if not py_path.endswith('.py'):
+                print(f"[DEBUG] File {py_path} doesn't have .py extension, creating temporary .py file")
+                temp_py_path = py_path + '.py'
+                import shutil
+                shutil.copyfile(py_path, temp_py_path)
+                py_path = temp_py_path
+                print(f"[DEBUG] Created temporary file: {py_path}")
+            if not os.path.exists(py_path):
+                raise FileNotFoundError(f"Model file not found: {py_path}")
+            spec = importlib.util.spec_from_file_location(mod_name, py_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Cannot load module from: {py_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--tokenizer_json", type=str, required=True)
+        parser.add_argument("--model_py", type=str, required=True)
+        parser.add_argument("--model_config", type=str, required=True)
+        parser.add_argument("--learned_weights", type=str, required=True)
+        parser.add_argument("--test_data_json", type=str, required=True)
+        parser.add_argument("--max_new_tokens", type=int, default=64)
+        parser.add_argument("--inference_results", type=str, required=True)
+        args = parser.parse_args()
+        
+        print(f"Checking input files...")
+        print(f"  tokenizer_json: {args.tokenizer_json} (exists: {os.path.exists(args.tokenizer_json)})")
+        print(f"  model_py: {args.model_py} (exists: {os.path.exists(args.model_py)})")
+        print(f"  model_config: {args.model_config} (exists: {os.path.exists(args.model_config)})")
+        print(f"  learned_weights: {args.learned_weights} (exists: {os.path.exists(args.learned_weights)})")
+        
+        os.makedirs(os.path.dirname(args.inference_results) or ".", exist_ok=True)
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        torch_device = torch.device(device)
+        model_dtype = torch.float16 if device == "cuda" else torch.float32
+
+        tok = Tokenizer.from_file(args.tokenizer_json)
+        bos_id = tok.token_to_id("<s>") or tok.token_to_id("<bos>")
+        eos_id = tok.token_to_id("</s>") or tok.token_to_id("<eos>")
+
+        with open(args.model_config, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg["dtype"] = model_dtype
+
+        print(f"Finding model .py file...")
+        model_py_path = find_model_py_file(args.model_py)
+        print(f"Loading model code from: {model_py_path}")
+        mod = load_module_from_path(model_py_path, "gemma3_model")
+        Gemma3Model = getattr(mod, "Gemma3Model")
+
+        model = Gemma3Model(cfg).to(torch_device)
+        state = torch.load(args.learned_weights, map_location=torch_device)
+        model.load_state_dict(state, strict=True)
+        model.eval()
+
+        context_len = int(cfg.get("context_length", 2048))
+
+        def generate_text(prompt, max_new_tokens=64):
+            ids = tok.encode(prompt).ids
+            if bos_id is not None:
+                ids = [bos_id] + ids
+            x = torch.tensor([ids], dtype=torch.long, device=torch_device)
+
+            for _ in range(max_new_tokens):
+                with torch.no_grad():
+                    logits = model(x)[0]
+                next_id = int(torch.argmax(logits[0, -1]).item())
+                ids.append(next_id)
+
+                if eos_id is not None and next_id == eos_id:
+                    break
+
+                if len(ids) > context_len:
+                    ids = ids[-context_len:]
+                x = torch.tensor([ids], dtype=torch.long, device=torch_device)
+
+            dec_ids = ids[1:] if (bos_id is not None and len(ids) and ids[0] == bos_id) else ids
+            return tok.decode(dec_ids)
+
+        # Parse test data
+        test_data = json.loads(args.test_data_json)
+        print(f"Processing {len(test_data)} test cases...")
+
+        # Initialize scorers
+        rouge_sc = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+        bleu_metric = BLEU()
+
+        results = []
+        for idx, (input_text, expected_output) in enumerate(test_data):
+            print(f"\n[{idx+1}/{len(test_data)}] Processing: {input_text[:50]}...")
+            
+            # Generate text
+            generated_output = generate_text(input_text, args.max_new_tokens)
+            
+            # Calculate ROUGE scores
+            rouge_scores = rouge_sc.score(expected_output, generated_output)
+            rouge_score = rouge_scores['rougeL'].fmeasure  # Using ROUGE-L F1 score
+            
+            # Calculate BLEU score
+            bleu_score = bleu_metric.sentence_score(generated_output, [expected_output]).score / 100.0
+            
+            result = {
+                "input": input_text,
+                "expected_output": expected_output,
+                "generated_output": generated_output,
+                "rouge_score": round(rouge_score, 4),
+                "bleu_score": round(bleu_score, 4)
+            }
+            results.append(result)
+            
+            print(f"  Generated: {generated_output[:100]}...")
+            print(f"  ROUGE: {rouge_score:.4f}, BLEU: {bleu_score:.4f}")
+
+        # Save aggregated results
+        output_data = {"results": results}
+        with open(args.inference_results, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+
+        print(f"\nInference results saved at {args.inference_results}")
+        print(f"Total test cases processed: {len(results)}")
+
+    args:
+      - --tokenizer_json
+      - {inputPath: tokenizer_json}
+      - --model_py
+      - {inputPath: model_py}
+      - --model_config
+      - {inputPath: model_config}
+      - --learned_weights
+      - {inputPath: learned_weights}
+      - --test_data_json
+      - {inputValue: test_data_json}
+      - --max_new_tokens
+      - {inputValue: max_new_tokens}
+      - --inference_results
+      - {outputPath: inference_results}
