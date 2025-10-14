@@ -20,6 +20,14 @@ inputs:
     type: Integer
     default: "64"
     description: Maximum number of tokens to generate
+  - name: temperature
+    type: Float
+    default: "1.0"
+    description: Sampling temperature (higher = more random, lower = more deterministic)
+  - name: top_k
+    type: Integer
+    default: "50"
+    description: Number of top tokens to sample from (top-k sampling)
 outputs:
   - name: inference_results
     type: Data
@@ -42,6 +50,7 @@ implementation:
         from tokenizers import Tokenizer
         from rouge_score import rouge_scorer
         from sacrebleu.metrics import BLEU
+        import torch.nn.functional as F
 
         def find_model_py_file(directory):
             print(f"[DEBUG] Searching for .py file in: {directory}")
@@ -83,9 +92,11 @@ implementation:
         parser.add_argument("--learned_weights", type=str, required=True)
         parser.add_argument("--test_data_json", type=str, required=True)
         parser.add_argument("--max_new_tokens", type=int, default=64)
+        parser.add_argument("--temperature", type=float, default=1.0)
+        parser.add_argument("--top_k", type=int, default=50)
         parser.add_argument("--inference_results", type=str, required=True)
         args = parser.parse_args()
-        
+
         print(f"Checking input files...")
         print(f"  tokenizer_json: {args.tokenizer_json} (exists: {os.path.exists(args.tokenizer_json)})")
         print(f"  model_py: {args.model_py} (exists: {os.path.exists(args.model_py)})")
@@ -119,7 +130,7 @@ implementation:
 
         context_len = int(cfg.get("context_length", 2048))
 
-        def generate_text(prompt, max_new_tokens=64):
+        def generate_text(prompt, max_new_tokens=64, temperature=1.0, top_k=50):
             ids = tok.encode(prompt).ids
             if bos_id is not None:
                 ids = [bos_id] + ids
@@ -127,13 +138,28 @@ implementation:
 
             for _ in range(max_new_tokens):
                 with torch.no_grad():
-                    logits = model(x)[0]
-                next_id = int(torch.argmax(logits[0, -1]).item())
+                    logits = model(x)[0, -1]  # Get the last token logits
+
+                # Apply temperature scaling
+                logits = logits / temperature
+
+                # Apply top-k sampling
+                if top_k is not None:
+                    indices_to_remove = logits < torch.topk(logits, top_k).values[-1]
+                    logits[indices_to_remove] = -float("Inf")
+
+                # Apply softmax to get probabilities
+                probs = F.softmax(logits, dim=-1)
+
+                # Sample from the probability distribution
+                next_id = torch.multinomial(probs, 1).item()
                 ids.append(next_id)
 
+                # Stop if the EOS token is reached
                 if eos_id is not None and next_id == eos_id:
                     break
 
+                # Maintain context length
                 if len(ids) > context_len:
                     ids = ids[-context_len:]
                 x = torch.tensor([ids], dtype=torch.long, device=torch_device)
@@ -151,10 +177,8 @@ implementation:
 
         results = []
         for idx, (input_text, expected_output) in enumerate(test_data):
-            
-            
             # Generate text
-            generated_output = generate_text(input_text, args.max_new_tokens)
+            generated_output = generate_text(input_text, args.max_new_tokens, args.temperature, args.top_k)
             
             # Calculate ROUGE scores
             rouge_scores = rouge_sc.score(expected_output, generated_output)
@@ -171,13 +195,11 @@ implementation:
                 "bleu_score": round(bleu_score, 4)
             }
             results.append(result)
-            
 
         # Save aggregated results
         output_data = {"results": results}
         with open(args.inference_results, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
-
 
     args:
       - --tokenizer_json
