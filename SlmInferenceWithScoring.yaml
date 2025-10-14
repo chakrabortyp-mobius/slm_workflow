@@ -151,7 +151,7 @@ implementation:
 
         results = []
         for idx, (input_text, expected_output) in enumerate(test_data):
-            print(f"\n[{idx+1}/{len(test_data)}] Processing: {input_text[:50]}...")
+            # print(f"\n[{idx+1}/{len(test_data)}] Processing: {input_text[:50]}...")
             
             # Generate text
             generated_output = generate_text(input_text, args.max_new_tokens)
@@ -172,16 +172,16 @@ implementation:
             }
             results.append(result)
             
-            print(f"  Generated: {generated_output[:100]}...")
-            print(f"  ROUGE: {rouge_score:.4f}, BLEU: {bleu_score:.4f}")
+            # print(f"  Generated: {generated_output[:100]}...")
+            # print(f"  ROUGE: {rouge_score:.4f}, BLEU: {bleu_score:.4f}")
 
         # Save aggregated results
         output_data = {"results": results}
         with open(args.inference_results, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
 
-        print(f"\nInference results saved at {args.inference_results}")
-        print(f"Total test cases processed: {len(results)}")
+        # print(f"\nInference results saved at {args.inference_results}")
+        # print(f"Total test cases processed: {len(results)}")
 
     args:
       - --tokenizer_json
