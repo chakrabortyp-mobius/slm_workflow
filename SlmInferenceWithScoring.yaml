@@ -97,11 +97,6 @@ implementation:
         parser.add_argument("--inference_results", type=str, required=True)
         args = parser.parse_args()
 
-        print(f"Checking input files...")
-        print(f"  tokenizer_json: {args.tokenizer_json} (exists: {os.path.exists(args.tokenizer_json)})")
-        print(f"  model_py: {args.model_py} (exists: {os.path.exists(args.model_py)})")
-        print(f"  model_config: {args.model_config} (exists: {os.path.exists(args.model_config)})")
-        print(f"  learned_weights: {args.learned_weights} (exists: {os.path.exists(args.learned_weights)})")
         
         os.makedirs(os.path.dirname(args.inference_results) or ".", exist_ok=True)
 
@@ -162,14 +157,13 @@ implementation:
             return tok.decode(dec_ids)
 
         test_data = json.loads(args.test_data_json)
-        print(f"Processing {len(test_data)} test cases...")
+        print(f"Processing {len(test_data)} test cases")
 
         rouge_sc = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
         bleu_metric = BLEU()
 
         results = []
         for idx, (input_text, expected_output) in enumerate(test_data):
-            print(f"\n[{idx+1}/{len(test_data)}] Processing: {input_text[:50]}...")
             
             generated_output = generate_text(input_text, args.max_new_tokens, args.temperature, args.top_k)
             
@@ -194,8 +188,7 @@ implementation:
         with open(args.inference_results, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
 
-        print(f"\nInference results saved at {args.inference_results}")
-        print(f"Total test cases processed: {len(results)}")
+
     args:
       - --tokenizer_json
       - {inputPath: tokenizer_json}
