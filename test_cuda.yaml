@@ -4,7 +4,7 @@ description: hhhdhd
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v20
+    image: gurpreetgandhi/nesy-factory:v19
     command:
       - python3
       - -u
