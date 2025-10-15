@@ -1,5 +1,5 @@
 name: Evaluate Gemma3 Model
-description: Evaluates a trained Gemma3 model using perplexity, BLEU, and ROUGE metrics, logs results to MLflow, and supports JSONL or plain-text eval files.
+description: Evaluates a trained Gemma3 model using BLEU and ROUGE metrics with temperature and top_k sampling
 inputs:
   - name: model_py
     type: Data
@@ -12,14 +12,30 @@ inputs:
     description: "Trained weights (.pth file)"
   - name: tokenizer_json
     type: Model
-    description: "Tokenizer JSON file with [PAD],[UNK],[BOS],[EOS] tokens"
+    description: "Tokenizer JSON file"
   - name: eval_data
     type: Data
-    description: "Evaluation data: JSONL with 'prompt' & 'ground_truth' OR plain text (one prompt per line)"
+    description: "Evaluation data: plain text file for chunking"
   - name: experiment_name
     type: String
     default: "gemma3_eval"
     description: "MLflow experiment name (optional)"
+  - name: max_new_tokens
+    type: Integer
+    default: "64"
+    description: Maximum number of tokens to generate
+  - name: temperature
+    type: Float
+    default: "1.0"
+    description: Sampling temperature (higher = more random, lower = more deterministic)
+  - name: top_k
+    type: Integer
+    default: "50"
+    description: Number of top tokens to sample from (top-k sampling)
+  - name: random_offset
+    type: Integer
+    default: "0"
+    description: Random offset for chunk extraction
 outputs:
   - name: metrics_json
     type: Metrics
@@ -36,7 +52,7 @@ implementation:
       - -c
       - |-
         import subprocess, sys
-        pkgs = ["mlflow", "rouge-score", "nltk", "pandas"]
+        pkgs = ["mlflow", "rouge-score", "pandas"]
         for p in pkgs:
             try:
                 __import__(p.replace("-", "_"))
@@ -45,23 +61,15 @@ implementation:
                 print(f"[INFO] Installing Python package: {p}")
                 subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", p])
         
-        # Download NLTK data
-        import nltk
-        try:
-            nltk.download('punkt', quiet=True)
-            nltk.download('punkt_tab', quiet=True)
-            print("[INFO] NLTK data downloaded successfully")
-        except Exception as e:
-            print(f"[WARNING] Could not download NLTK data: {e}")
-        
-        import argparse, json, os, math, importlib.util
+        import argparse, json, os, importlib.util, random
         import shutil
         import torch
+        import torch.nn.functional as F
         import pandas as pd
         import mlflow
         from tokenizers import Tokenizer
-        from nltk.translate.bleu_score import corpus_bleu
         from rouge_score import rouge_scorer
+        from sacrebleu.metrics import BLEU
 
         # ----------------- helpers -----------------
         def find_model_py_file(directory):
@@ -84,7 +92,6 @@ implementation:
             if not py_path.endswith('.py'):
                 print(f"[DEBUG] File {py_path} doesn't have .py extension, creating temporary .py file")
                 temp_py_path = py_path + '.py'
-                import shutil
                 shutil.copyfile(py_path, temp_py_path)
                 py_path = temp_py_path
                 print(f"[DEBUG] Created temporary file: {py_path}")
@@ -97,175 +104,78 @@ implementation:
             spec.loader.exec_module(module)
             return module
 
-
-
-        def generate_text(model, tokenizer, prompt, max_length=50):
-            model.eval()
+        def generate_text(model, tokenizer, prompt, bos_id, eos_id, context_len, max_new_tokens=64, temperature=1.0, top_k=50):
             device = next(model.parameters()).device
-            
-            # Encode prompt
-            input_ids = tokenizer.encode(prompt, add_special_tokens=True).ids
-            generated_ids = list(input_ids)
-            
-            # Get special token IDs
-            eos_id = tokenizer.token_to_id("[EOS]")
-            pad_id = tokenizer.token_to_id("[PAD]")
-            
-            with torch.no_grad():
-                for _ in range(max_length - len(input_ids)):
-                    current_input = torch.tensor([generated_ids], device=device)
-                    
-                    # Get model output - handle both tuple and tensor returns
-                    output = model(current_input)
-                    if isinstance(output, tuple):
-                        logits = output[0]  # (batch, seq_len, vocab_size)
-                    else:
-                        logits = output
-                    
-                    # Get next token
-                    next_token_id = torch.argmax(logits[:, -1, :], dim=-1).item()
-                    
-                    # Stop at EOS or PAD
-                    if (eos_id is not None and next_token_id == eos_id) or \
-                       (pad_id is not None and next_token_id == pad_id):
-                        break
-                    
-                    generated_ids.append(next_token_id)
-            
-            # Decode and return
-            return tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        def calculate_perplexity(model, tokenizer, data, device):
             model.eval()
-            total_loss, total_tokens = 0.0, 0
-            loss_fn = torch.nn.CrossEntropyLoss(reduction='sum', ignore_index=tokenizer.token_to_id("[PAD]") or -100)
             
-            for idx, row in data.iterrows():
-                # Combine prompt and ground truth for perplexity calculation
-                text = row["prompt"]
-                if row.get("ground_truth") and str(row["ground_truth"]).strip():
-                    text += " " + str(row["ground_truth"])
-                
-                # Encode text
-                ids = tokenizer.encode(text, add_special_tokens=True).ids
-                if len(ids) < 2:
-                    continue
-                
-                input_tensor = torch.tensor([ids], device=device)
-                
+            ids = tokenizer.encode(prompt).ids
+            if bos_id is not None:
+                ids = [bos_id] + ids
+            x = torch.tensor([ids], dtype=torch.long, device=device)
+
+            for _ in range(max_new_tokens):
                 with torch.no_grad():
-                    try:
-                        # Try to get loss from model if it supports labels
-                        output = model(input_tensor, labels=input_tensor)
-                        if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-                            loss = output[1]
-                            tokens = max(0, input_tensor.size(1) - 1)
-                        else:
-                            # Calculate loss manually
-                            logits = output[0] if isinstance(output, tuple) else output
-                            # Shift for next-token prediction
-                            shift_logits = logits[:, :-1, :].contiguous()
-                            shift_labels = input_tensor[:, 1:].contiguous()
-                            loss = loss_fn(
-                                shift_logits.view(-1, shift_logits.size(-1)),
-                                shift_labels.view(-1)
-                            )
-                            tokens = shift_labels.numel()
-                    except Exception as e:
-                        print(f"[WARNING] Error calculating loss for sample {idx}: {e}")
-                        continue
-                
-                if loss is not None and tokens > 0:
-                    total_loss += loss.item()
-                    total_tokens += tokens
-            
-            if total_tokens == 0:
-                print("[WARNING] No valid tokens for perplexity calculation")
-                return float("inf")
-            
-            avg_loss = total_loss / total_tokens
-            perplexity = math.exp(avg_loss) if avg_loss < 100 else float("inf")
-            return perplexity
+                    model_output = model(x)
+                    if isinstance(model_output, tuple):
+                        logits = model_output[0][0, -1]
+                    else:
+                        logits = model_output[0, -1]
 
-        def calculate_bleu(model, tokenizer, data):
-            predictions, references = [], []
-            pred_texts = []
-            
-            for idx, row in data.iterrows():
-                try:
-                    pred = generate_text(model, tokenizer, row["prompt"], max_length=100)
-                    pred_texts.append(pred)
-                    predictions.append(pred.split())
-                    
-                    # Handle ground truth
-                    gt = str(row.get("ground_truth") or "").strip()
-                    references.append([gt.split()])
-                except Exception as e:
-                    print(f"[WARNING] Error generating text for sample {idx}: {e}")
-                    pred_texts.append("")
-                    predictions.append([])
-                    references.append([[]])
-            
-            # Calculate BLEU score
-            try:
-                bleu = corpus_bleu(references, predictions)
-            except Exception as e:
-                print(f"[WARNING] Error calculating BLEU: {e}")
-                bleu = 0.0
-            
-            return bleu, pred_texts
+                logits = logits / temperature
 
-        def calculate_rouge(model, tokenizer, data):
-            scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
-            r1s, r2s, rLs = [], [], []
-            
-            for idx, row in data.iterrows():
-                try:
-                    pred = generate_text(model, tokenizer, row["prompt"], max_length=100)
-                    gt = str(row.get("ground_truth") or "").strip()
-                    
-                    # Skip if both are empty
-                    if not pred and not gt:
-                        continue
-                    
-                    scores = scorer.score(gt if gt else " ", pred if pred else " ")
-                    r1s.append(scores["rouge1"].fmeasure)
-                    r2s.append(scores["rouge2"].fmeasure)
-                    rLs.append(scores["rougeL"].fmeasure)
-                except Exception as e:
-                    print(f"[WARNING] Error calculating ROUGE for sample {idx}: {e}")
-                    continue
-            
-            def avg(xs): return sum(xs) / len(xs) if xs else 0.0
-            return avg(r1s), avg(r2s), avg(rLs)
+                if top_k is not None:
+                    indices_to_remove = logits < torch.topk(logits, top_k).values[-1]
+                    logits[indices_to_remove] = -float("Inf")
 
-        def load_eval_data(path):
-            try:
-                # Try loading as JSONL
-                df = pd.read_json(path, lines=True)
-                if {"prompt", "ground_truth"}.issubset(df.columns):
-                    print(f"[INFO] Loaded {len(df)} samples from JSONL with prompt and ground_truth")
-                    return df
-                if "prompt" in df.columns and "ground_truth" not in df.columns:
-                    df = df.copy()
-                    df["ground_truth"] = ""
-                    print(f"[INFO] Loaded {len(df)} samples from JSONL with prompt only")
-                    return df
-            except Exception as e:
-                print(f"[INFO] Could not load as JSONL: {e}")
+                probs = F.softmax(logits, dim=-1)
+                next_id = torch.multinomial(probs, 1).item()
+                ids.append(next_id)
+
+                if eos_id is not None and next_id == eos_id:
+                    break
+
+                if len(ids) > context_len:
+                    ids = ids[-context_len:]
+                x = torch.tensor([ids], dtype=torch.long, device=device)
+
+            dec_ids = ids[1:] if (bos_id is not None and len(ids) and ids[0] == bos_id) else ids
+            return tokenizer.decode(dec_ids)
+
+        def prepare_eval_data(eval_data_path, tokenizer, random_offset):
+            # Read the full text
+            with open(eval_data_path, "r", encoding="utf-8") as f:
+                full_text = f.read()
             
-            # Load as plain text
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    lines = [l.strip() for l in f if l.strip()]
-                print(f"[INFO] Loaded {len(lines)} prompts from plain text file")
-                return pd.DataFrame({"prompt": lines, "ground_truth": [""] * len(lines)})
-            except Exception as e:
-                raise ValueError(f"Could not load eval data from {path}: {e}")
+            print(f"[INFO] Full text length: {len(full_text)} characters")
+            
+            # Tokenize the full text
+            tokens = tokenizer.encode(full_text).ids
+            print(f"[INFO] Total tokens: {len(tokens)}")
+            
+            # Create chunks with random offset
+            chunk_size = 128
+            max_offset = min(random_offset, len(tokens) - 128)
+            
+            chunks = [tokens[i + max_offset:i + max_offset + chunk_size] 
+                     for i in range(0, len(tokens) - 128, chunk_size)]
+            
+            print(f"[INFO] Created {len(chunks)} chunks with offset {max_offset}")
+            
+            # Split each chunk into prompt and ground truth (64 tokens each)
+            prompt_ground_truth_pairs = []
+            for chunk in chunks:
+                if len(chunk) >= 128:
+                    prompt = chunk[:64]
+                    ground_truth = chunk[64:128]
+                    prompt_text = ' '.join(tokenizer.decode(prompt).split())
+                    ground_truth_text = ' '.join(tokenizer.decode(ground_truth).split())
+                    prompt_ground_truth_pairs.append((prompt_text, ground_truth_text))
+            
+            print(f"[INFO] Created {len(prompt_ground_truth_pairs)} prompt-ground_truth pairs")
+            return prompt_ground_truth_pairs
 
         # ----------------- main -----------------
         def main():
-            
             ap = argparse.ArgumentParser(description="Evaluate a trained Gemma3 model.")
             ap.add_argument("--model-py", type=str, required=True)
             ap.add_argument("--model-config", required=True)
@@ -273,6 +183,10 @@ implementation:
             ap.add_argument("--tokenizer-json", required=True)
             ap.add_argument("--eval-data", required=True)
             ap.add_argument("--experiment_name", default="gemma3_eval")
+            ap.add_argument("--max-new-tokens", type=int, default=64)
+            ap.add_argument("--temperature", type=float, default=1.0)
+            ap.add_argument("--top-k", type=int, default=50)
+            ap.add_argument("--random-offset", type=int, default=0)
             ap.add_argument("--metrics-json", default="mlpipeline-metrics.json")
             ap.add_argument("--results-csv", default="evaluation_results.csv")
             args = ap.parse_args()
@@ -281,6 +195,7 @@ implementation:
             print(f"[INFO] Model config: {args.model_config}")
             print(f"[INFO] Model weights: {args.model_weights}")
             print(f"[INFO] Eval data: {args.eval_data}")
+            print(f"[INFO] Temperature: {args.temperature}, Top-K: {args.top_k}")
 
             # Initialize MLflow
             mlflow.set_experiment(args.experiment_name)
@@ -290,82 +205,109 @@ implementation:
                     "model_config": args.model_config,
                     "model_weights": args.model_weights,
                     "tokenizer_json": args.tokenizer_json,
-                    "eval_data": args.eval_data
+                    "eval_data": args.eval_data,
+                    "max_new_tokens": args.max_new_tokens,
+                    "temperature": args.temperature,
+                    "top_k": args.top_k,
+                    "random_offset": args.random_offset
                 })
 
                 # Set device
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+                torch_device = torch.device(device)
+                model_dtype = torch.float16 if device == "cuda" else torch.float32
                 print(f"[INFO] Using device: {device}")
-
-                # Load model config
-                with open(args.model_config, "r") as f:
-                    config = json.load(f)
-                
-                # Handle dtype
-                if config.get("dtype") == "float16" and device == "cuda":
-                    config["dtype"] = torch.float16
-                else:
-                    config["dtype"] = torch.float32
-                
-                print(f"[INFO] Model config: {config}")
-
-                # Load model
-                print("[INFO] Loading model...")
-                model_file = find_model_py_file(args.model_py)
-                print(f"[INFO] Model file: {model_file}")
-                ModelClass = load_module_from_path(model_file, "Gemma3Model")
-                Gemma3Model = getattr(ModelClass, "Gemma3Model")
-                model = Gemma3Model(config).to(device)
-                
-                # Load weights
-                state_dict = torch.load(args.model_weights, map_location=device)
-                model.load_state_dict(state_dict)
-                model.eval()
-                print("[INFO] Model loaded successfully")
 
                 # Load tokenizer
                 print("[INFO] Loading tokenizer...")
-                tokenizer = Tokenizer.from_file(args.tokenizer_json)
-                print(f"[INFO] Tokenizer vocab size: {tokenizer.get_vocab_size()}")
-                print(f"[INFO] Special tokens: [PAD]={tokenizer.token_to_id('[PAD]')}, [UNK]={tokenizer.token_to_id('[UNK]')}, [BOS]={tokenizer.token_to_id('[BOS]')}, [EOS]={tokenizer.token_to_id('[EOS]')}")
+                tok = Tokenizer.from_file(args.tokenizer_json)
+                bos_id = tok.token_to_id("<s>") or tok.token_to_id("<bos>")
+                eos_id = tok.token_to_id("</s>") or tok.token_to_id("<eos>")
+                print(f"[INFO] Tokenizer vocab size: {tok.get_vocab_size()}")
 
-                # Load evaluation data
-                print("[INFO] Loading evaluation data...")
-                eval_df = load_eval_data(args.eval_data)
-                print(f"[INFO] Evaluation dataset size: {len(eval_df)}")
+                # Load model config
+                with open(args.model_config, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg["dtype"] = model_dtype
+                context_len = int(cfg.get("context_length", 2048))
+                print(f"[INFO] Model config: {cfg}")
 
-                # Calculate metrics
-                print("[INFO] Calculating perplexity...")
-                perplexity = calculate_perplexity(model, tokenizer, eval_df, device)
-                print(f"[INFO] Perplexity: {perplexity:.4f}")
+                # Load model
+                print("[INFO] Loading model...")
+                model_py_path = find_model_py_file(args.model_py)
+                print(f"[INFO] Loading model code from: {model_py_path}")
+                mod = load_module_from_path(model_py_path, "gemma3_model")
+                Gemma3Model = getattr(mod, "Gemma3Model")
 
-                print("[INFO] Calculating BLEU score...")
-                bleu, preds = calculate_bleu(model, tokenizer, eval_df)
-                print(f"[INFO] BLEU Score: {bleu:.4f}")
+                model = Gemma3Model(cfg).to(torch_device)
+                state = torch.load(args.model_weights, map_location=torch_device)
+                model.load_state_dict(state, strict=True)
+                model.eval()
+                print("[INFO] Model loaded successfully")
 
-                print("[INFO] Calculating ROUGE scores...")
-                r1, r2, rL = calculate_rouge(model, tokenizer, eval_df)
-                print(f"[INFO] ROUGE-1: {r1:.4f}, ROUGE-2: {r2:.4f}, ROUGE-L: {rL:.4f}")
+                # Prepare evaluation data
+                print("[INFO] Preparing evaluation data...")
+                test_data = prepare_eval_data(args.eval_data, tok, args.random_offset)
+                print(f"[INFO] Processing {len(test_data)} test cases")
+
+                # Initialize scorers
+                rouge_sc = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+                bleu_metric = BLEU()
+
+                # Generate predictions and calculate scores
+                results = []
+                rouge_scores_list = []
+                bleu_scores_list = []
+                
+                for idx, (input_text, expected_output) in enumerate(test_data):
+                    print(f"[INFO] Processing sample {idx+1}/{len(test_data)}")
+                    
+                    # Generate output
+                    generated_output = generate_text(
+                        model, tok, input_text, bos_id, eos_id, context_len,
+                        args.max_new_tokens, args.temperature, args.top_k
+                    )
+                    
+                    # Calculate ROUGE
+                    rouge_scores = rouge_sc.score(expected_output, generated_output)
+                    rouge_score = rouge_scores['rougeL'].fmeasure
+                    rouge_scores_list.append(rouge_score)
+                    
+                    # Calculate BLEU
+                    bleu_score = bleu_metric.sentence_score(generated_output, [expected_output]).score / 100.0
+                    bleu_scores_list.append(bleu_score)
+                    
+                    result = {
+                        "prompt": input_text,
+                        "ground_truth": expected_output,
+                        "prediction": generated_output,
+                        "rouge_score": round(rouge_score, 4),
+                        "bleu_score": round(bleu_score, 4)
+                    }
+                    results.append(result)
+                    
+                    print(f"  Generated: {generated_output[:100]}...")
+                    print(f"  ROUGE: {rouge_score:.4f}, BLEU: {bleu_score:.4f}")
+
+                # Calculate average scores
+                avg_rouge = sum(rouge_scores_list) / len(rouge_scores_list) if rouge_scores_list else 0.0
+                avg_bleu = sum(bleu_scores_list) / len(bleu_scores_list) if bleu_scores_list else 0.0
+
+                print(f"[INFO] Average ROUGE-L: {avg_rouge:.4f}")
+                print(f"[INFO] Average BLEU: {avg_bleu:.4f}")
 
                 # Prepare metrics
                 scalar_metrics = {
-                    "perplexity": float(perplexity),
-                    "bleu_score": float(bleu),
-                    "rouge1_f1": float(r1),
-                    "rouge2_f1": float(r2),
-                    "rougeL_f1": float(rL),
+                    "bleu_score": float(avg_bleu),
+                    "rouge_score": float(avg_rouge),
                 }
 
                 # Log to MLflow
                 mlflow.log_metrics(scalar_metrics)
                 print("[INFO] Metrics logged to MLflow")
 
-                # Save predictions table
-                results_df = pd.DataFrame({
-                    "prompt": eval_df["prompt"],
-                    "ground_truth": eval_df["ground_truth"],
-                    "prediction": preds
-                })
+                # Save results CSV
+                results_df = pd.DataFrame(results)
                 os.makedirs(os.path.dirname(args.results_csv) or ".", exist_ok=True)
                 results_df.to_csv(args.results_csv, index=False)
                 mlflow.log_artifact(args.results_csv)
@@ -373,20 +315,13 @@ implementation:
 
                 # Write KFP Metrics schema (UI-compatible)
                 kfp_metrics = {
-                    "metrics": [
-                        {"name": "perplexity", "numberValue": scalar_metrics["perplexity"], "format": "RAW"},
-                        {"name": "bleu_score", "numberValue": scalar_metrics["bleu_score"], "format": "PERCENTAGE"},
-                        {"name": "rouge1_f1", "numberValue": scalar_metrics["rouge1_f1"], "format": "PERCENTAGE"},
-                        {"name": "rouge2_f1", "numberValue": scalar_metrics["rouge2_f1"], "format": "PERCENTAGE"},
-                        {"name": "rougeL_f1", "numberValue": scalar_metrics["rougeL_f1"], "format": "PERCENTAGE"},
-                    ]
+                    "bleu_score": scalar_metrics["bleu_score"],
+                    "rouge_score": scalar_metrics["rouge_score"],
                 }
                 os.makedirs(os.path.dirname(args.metrics_json) or ".", exist_ok=True)
                 with open(args.metrics_json, "w", encoding="utf-8") as f:
                     json.dump(kfp_metrics, f, indent=2)
                 print(f"[INFO] KFP metrics saved to {args.metrics_json}")
-
-
 
         if __name__ == "__main__":
             main()
@@ -403,6 +338,14 @@ implementation:
       - {inputPath: eval_data}
       - --experiment_name
       - {inputValue: experiment_name}
+      - --max-new-tokens
+      - {inputValue: max_new_tokens}
+      - --temperature
+      - {inputValue: temperature}
+      - --top-k
+      - {inputValue: top_k}
+      - --random-offset
+      - {inputValue: random_offset}
       - --metrics-json
       - {outputPath: metrics_json}
       - --results-csv
