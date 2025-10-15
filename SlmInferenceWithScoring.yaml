@@ -30,7 +30,7 @@ inputs:
     description: Number of top tokens to sample from (top-k sampling)
 outputs:
   - name: inference_results
-    type: Data
+    type: String
     description: JSON file with all inference results and scores
 implementation:
   container:
