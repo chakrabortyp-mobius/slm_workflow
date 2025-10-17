@@ -52,7 +52,7 @@ implementation:
       - -c
       - |-
         import subprocess, sys
-        pkgs = ["mlflow", "rouge-score", "pandas"]
+        pkgs = ["mlflow", "rouge-score", "pandas", "sacrebleu"]
         for p in pkgs:
             try:
                 __import__(p.replace("-", "_"))
