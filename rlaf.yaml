@@ -156,7 +156,6 @@ implementation:
             return metrics
 
         def build_dqn_params(metrics_dict):
-            """Build DQN params similar to RNN brick"""
             dqn = []
             for key, value in metrics_dict.items():
                 try:
