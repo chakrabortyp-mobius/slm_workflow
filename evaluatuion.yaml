@@ -317,8 +317,10 @@ implementation:
 
                 # Write KFP Metrics schema (UI-compatible)
                 kfp_metrics = {
-                    "bleu_score": scalar_metrics["bleu_score"],
-                    "rouge_score": scalar_metrics["rouge_score"],
+                    "metrics": [
+                        {"name": "bleu_score", "numberValue": scalar_metrics["bleu_score"], "format": "PERCENTAGE"},
+                        {"name": "rouge_score", "numberValue": scalar_metrics["rouge_score"], "format": "PERCENTAGE"}
+                    ]
                 }
                 os.makedirs(os.path.dirname(args.metrics_json) or ".", exist_ok=True)
                 with open(args.metrics_json, "w", encoding="utf-8") as f:
