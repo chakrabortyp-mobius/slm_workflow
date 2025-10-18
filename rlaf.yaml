@@ -24,7 +24,7 @@ inputs:
   - {name: init_metrics,      type: Metrics}
 
 outputs:
-  - {name: rlaf_output,     type: Data}
+  - {name: rlaf_output,     type: Dataset}
   - {name: retrained_model, type: Model}
 
 implementation:
@@ -47,9 +47,10 @@ implementation:
         # ---------------- HTTP helpers ----------------
         def get_retry_session():
             retry = Retry(total=5, status_forcelist=[500,502,503,504], backoff_factor=1)
+            adapter = HTTPAdapter(max_retries=retry)
             s = requests.Session()
-            s.mount("https://", HTTPAdapter(max_retries=retry))
-            s.mount("http://",  HTTPAdapter(max_retries=retry))
+            s.mount("https://", adapter)
+            s.mount("http://",  adapter)
             return s
 
         def get_instance(access_token, domain, schema_id, model_id):
@@ -57,8 +58,10 @@ implementation:
             url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             payload = {"dbType": "TIDB", "ownedOnly": True, "filter": {"model_id": model_id}}
+            print(f"Get instance request URL: {url}, Headers: {headers}, Payload: {payload}")
             r = http.post(url, headers=headers, json=payload, timeout=30)
             r.raise_for_status()
+            print(f"Get instance. Status Code: {r.status_code}, Full response: {r.json()}")
             return r.json()["content"][0]
 
         def update_instance_field(access_token, domain, schema_id, model_id, field, value):
@@ -70,8 +73,13 @@ implementation:
                 "conditionalFilter":{"conditions":[{"field":"model_id","operator":"EQUAL","value":model_id}]},
                 "partialUpdateRequests":[{"patch":[{"operation":"REPLACE","path":f"{field}","value":value}]}]
             }
+            print(f"Update instance field request - URL: {url}, Headers: {headers}, Payload: {json.dumps(payload)}")
+            headers_str = " ".join([f"-H '{k}: {v}'" for k, v in headers.items()])
+            print(f"curl -X PATCH '{url}' {headers_str} -d '{json.dumps(payload)}'")
             r = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
             r.raise_for_status()
+            print(f"Update instance field. Status Code: {r.status_code}, Full response: {r.json()}")
+            print(f"Successfully updated field '{field}' for model_id '{model_id}'")
 
         def trigger_pipeline(config, pipeline_domain, dqn_params=None):
             http = get_retry_session()
@@ -87,28 +95,35 @@ implementation:
             })
             headers={"accept":"application/json","Authorization":f"Bearer {config['access_token']}",
                      "Content-Type":"application/json"}
+            print(f"Trigger pipeline request URL: {url}, Headers: {headers}, Payload: {payload}")
             r = http.post(url, headers=headers, data=payload, timeout=30)
             r.raise_for_status()
+            print(f"Triggered pipeline. Status Code: {r.status_code}, Response: {r.json()}")
             return r.json()["runId"]
 
         def get_pipeline_status(config, pipeline_domain):
             http = get_retry_session()
             url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
             headers={"accept":"application/json","Authorization":f"Bearer {config['access_token']}"}
+            print(f"Get pipeline status request URL: {url}, Headers: {headers}")
             r = http.get(url, headers=headers, timeout=30)
             r.raise_for_status()
-            return r.json()["run_details"]["state_history"][-1]["state"]
+            pipeline_status = r.json()
+            print(f"Get pipeline status. Status Code: {r.status_code}, Full response: {pipeline_status}")
+            latest_state = pipeline_status["run_details"]["state_history"][-1]
+            return latest_state["state"]
 
         def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params):
             run_id = trigger_pipeline(config, pipeline_domain, dqn_params)
             config["run_id"] = run_id
             while True:
                 s = get_pipeline_status(config, pipeline_domain)
-                print("[DQN] status:", s)
+                print(f"Current DQN pipeline status: {s}")
                 if s == "SUCCEEDED":
+                    print("DQN Pipeline execution completed.")
                     break
                 if s in ["FAILED","ERROR"]:
-                    raise RuntimeError(f"DQN failed: {s}")
+                    raise RuntimeError(f"DQN Pipeline failed with status {s}")
                 time.sleep(60)
 
         # ---------------- Metrics helpers ----------------
@@ -141,17 +156,24 @@ implementation:
             return metrics
 
         def build_dqn_params(metrics_dict):
-            keys = [("perplexity","-"),("bleu_score","+"),("rouge1_f1","+"),
-                    ("rouge2_f1","+"),("rougeL_f1","+"),("val_loss","-")]
-            dqn=[]
-            for k,sign in keys:
-                if k in (metrics_dict or {}):
-                    try:
-                        float(metrics_dict[k])
-                        dqn.append({"key":k,"sign":sign,"mul":1.0})
-                    except:
-                        pass
-            return dqn or [{"key":"perplexity","sign":"-"}]
+            """Build DQN params similar to RNN brick"""
+            dqn = []
+            for key, value in metrics_dict.items():
+                try:
+                    float(value)
+                    # Determine sign based on metric name
+                    if "loss" in key.lower() or "perplexity" in key.lower():
+                        sign = "-"
+                    elif "accuracy" in key.lower() or "f1" in key.lower() or "bleu" in key.lower() or "rouge" in key.lower():
+                        sign = "+"
+                    else:
+                        continue  # Skip metrics we don't recognize
+                    dqn.append({"key": key, "sign": sign, "mul": 1.0})
+                except (ValueError, TypeError):
+                    print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
+            
+            # Return default if no valid metrics found
+            return dqn if dqn else [{"key":"perplexity","sign":"-","mul":1.0}]
 
         # ---------------- Action handling ----------------
         def coerce_action_params(action_params: dict) -> dict:
@@ -271,13 +293,25 @@ implementation:
             with open(args.access_token,"r") as f:
                 access_token = f.read().strip()
 
+            # Load initial metrics (handle both KFP format and plain dict)
             current_metrics = {}
             if args.init_metrics and os.path.exists(args.init_metrics):
                 try:
                     with open(args.init_metrics,"r") as f:
-                        current_metrics = json.load(f)
+                        data = json.load(f)
+                    
+                    # Check if it's KFP metrics format
+                    if "metrics" in data and isinstance(data["metrics"], list):
+                        # Convert KFP format to plain dict
+                        for metric in data["metrics"]:
+                            current_metrics[metric["name"]] = metric["numberValue"]
+                    else:
+                        # Assume it's already a plain dict
+                        current_metrics = data
+                    
+                    print(f"[INFO] Loaded initial metrics: {current_metrics}")
                 except Exception as e:
-                    print("[warn] parse init_metrics:", e)
+                    print(f"[warn] parse init_metrics: {e}")
 
             defaults = {
                 "learning_rate": 1e-4, "min_lr": 1e-5, "warmup_steps": 1,
@@ -297,23 +331,40 @@ implementation:
             out_dir = os.path.dirname(args.retrained_model) or "."
 
             action_id_for_next_pierce = -1
-            for _ in range(2):
-                dqn_params = build_dqn_params(current_metrics)
-                print("[DQN param_json]", json.dumps(dqn_params))
+            
+            for iteration in range(2):
+                print(f"=" * 80)
+                print(f" RLAF Loop Iteration {iteration + 1}")
+                print(f"=" * 80)
+                
+                # Clean and prepare metrics for DQN
+                cleaned_metrics = {}
+                for key, value in current_metrics.items():
+                    try:
+                        cleaned_metrics[key] = float(value)
+                    except (ValueError, TypeError):
+                        print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
+                
+                dqn_params = build_dqn_params(cleaned_metrics)
+                print(f"Dynamically generated param_json for DQN: {json.dumps(dqn_params)}")
 
+                # Get current instance state
                 inst = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                print(f"Current instance: {inst}")
+                
                 if inst.get("pierce2rlaf"):
                     last = inst["pierce2rlaf"][-1]
-                    previous_state = last.get("current_state", {})
+                    previous_state = last.get("current_state", cleaned_metrics)
                     episode = last.get("episode", 0)
                 else:
-                    previous_state = {}
+                    previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
                     episode = 0
 
+                # Update pierce2rlaf with current state
                 new_entry = {
                     "action_id": action_id_for_next_pierce,
                     "previous_state": previous_state,
-                    "current_state": current_metrics,
+                    "current_state": cleaned_metrics,
                     "episode": episode,
                     "timestamp": int(time.time())
                 }
@@ -321,57 +372,72 @@ implementation:
                 hist.append(new_entry)
                 update_instance_field(access_token, args.domain, args.schema_id, args.model_id, "pierce2rlaf", hist)
 
+                # Trigger DQN pipeline
                 dqn_cfg = {
                     "pipeline_id": args.dqn_pipeline_id,
                     "experiment_id": args.dqn_experiment_id,
                     "access_token": access_token
                 }
+                print(f"DQN Config: {dqn_cfg}")
                 trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
 
+                # Get DQN recommendation
                 updated = get_instance(access_token, args.domain, args.schema_id, args.model_id)
                 latest = updated["rlaf2pierce"][-1]
+                
                 if not latest.get("pierce_or_not", True):
-                    print("[RLAF] pierce_or_not=false; stopping.")
+                    print("pierce_or_not is false. Exiting loop.")
                     break
 
+                print(f"Latest rlaf2pierce: {latest}")
+                
                 action_id_for_next_pierce = latest["action_id"]
                 actions = updated.get("rlaf_actions", {}).get("actions", [])
                 action = next((a for a in actions if a.get("id") == action_id_for_next_pierce), None)
                 if not action:
-                    raise ValueError(f"Action id {action_id_for_next_pierce} not found")
+                    raise ValueError(f"Action with ID {action_id_for_next_pierce} not found in rlaf_actions")
 
-                print("[RLAF] applying action:", action.get("name"), action.get("params"))
+                print(f"DQN pipeline recommended action: {action}. Retraining model.")
+                
+                # Train with recommended action
                 metrics, err_thresh, best_path = train_llm_with_action(action.get("params", {}), paths, defaults, out_dir)
 
-                score = 0.0
+                # Calculate improvement score
+                improvement_score = 0.0
                 for p in dqn_params:
                     k = p["key"]
                     sign = 1 if p["sign"] == "+" else -1
                     if k in metrics and k in previous_state:
                         try:
-                            score += (float(metrics[k]) - float(previous_state[k])) * sign
+                            improvement = (float(metrics[k]) - float(previous_state[k])) * sign
+                            improvement_score += improvement
                         except:
                             pass
 
+                # Check threshold violation
                 viol, key_used, val_used = pick_threshold_violation(metrics, err_thresh)
                 if key_used is not None:
                     print(f"[Gate] {key_used}={val_used} vs threshold={err_thresh} → {'VIOLATE' if viol else 'OK'}")
 
-                if score > 0 and not viol:
-                    print(f"[RLAF] Improved (score={score:.4f}) → keep {best_path}")
+                # Decide whether to keep model
+                if improvement_score > 0 and not viol:
+                    print(f"Metrics improved (score: {improvement_score:.4f}). Saving model.")
                     if os.path.abspath(best_path) != os.path.abspath(args.retrained_model):
                         shutil.copy2(best_path, args.retrained_model)
+                    print(f"Saved retrained model to {args.retrained_model}")
                 else:
-                    reason = "no improvement" if score <= 0 else "threshold violated"
-                    print("[RLAF] Rejecting update:", reason)
+                    reason = "no improvement" if improvement_score <= 0 else "threshold violated"
+                    print(f"No improvement in metrics (reason: {reason}, score: {improvement_score:.4f}). Model not saved.")
+                    os.makedirs(os.path.dirname(args.retrained_model), exist_ok=True)
                     with open(args.retrained_model, "w") as f:
-                        f.write("Model not saved due to gating.")
+                        f.write("Model not saved due to lack of improvement.")
 
                 current_metrics = metrics
 
+            # Write final output
             with open(args.rlaf_output,"w") as f:
-                json.dump({"final_metrics": current_metrics}, f, indent=2)
-            print("[RLAF] finished; metrics written.")
+                json.dump({"final_metrics": current_metrics}, f, indent=4)
+            print(f"RLAF loop finished. Final parameters written to {args.rlaf_output}")
 
         if __name__ == "__main__":
             main()
