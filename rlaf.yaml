@@ -337,6 +337,7 @@ implementation:
                 print(f"=" * 80)
                 
                 # Clean and prepare metrics for DQN
+                cleaned_metrics = {}
                 fixed_keys = [("bleu_score", "+"), ("rouge_score", "+"), ("perplexity", "-")]
                 for k, _ in fixed_keys:
                   cleaned_metrics.setdefault(k, 0.0)  # If 'perplexity' is missing, it will be set to 0.0
