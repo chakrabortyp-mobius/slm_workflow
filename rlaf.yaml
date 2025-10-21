@@ -388,6 +388,7 @@ implementation:
 
                 # Get DQN recommendation
                 updated = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                print(f"{updated}")
                 latest = updated["rlaf2pierce"][-1]
                 
                 if not latest.get("pierce_or_not", True):
