@@ -337,14 +337,19 @@ implementation:
                 print(f"=" * 80)
                 
                 # Clean and prepare metrics for DQN
-                cleaned_metrics = {}
-                for key, value in current_metrics.items():
-                    try:
-                        cleaned_metrics[key] = float(value)
-                    except (ValueError, TypeError):
-                        print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
+                fixed_keys = [("bleu_score", "+"), ("rouge_score", "+"), ("perplexity", "-")]
+                for k, _ in fixed_keys:
+                  cleaned_metrics.setdefault(k, 0.0)  # If 'perplexity' is missing, it will be set to 0.0
+
+                dqn_params = [{"key": k, "sign": s, "mul": 1.0} for k, s in fixed_keys]
+                # cleaned_metrics = {}
+                # for key, value in current_metrics.items():
+                #     try:
+                #         cleaned_metrics[key] = float(value)
+                #     except (ValueError, TypeError):
+                #         print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
                 
-                dqn_params = build_dqn_params(cleaned_metrics)
+                # dqn_params = build_dqn_params(cleaned_metrics)
                 print(f"Dynamically generated param_json for DQN: {json.dumps(dqn_params)}")
 
                 # Get current instance state
