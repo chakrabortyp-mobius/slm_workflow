@@ -473,7 +473,7 @@ implementation:
                         "experiment_id": args.dqn_experiment_id,
                         "access_token": access_token
                     }
-                    dqn_success = trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                    dqn_success = trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, fixed_dqn_params)
                     # dqn_success = trigger_and_wait_for_dqn_pipeline(
                     #     dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
                     # )
