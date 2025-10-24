@@ -113,7 +113,7 @@ implementation:
             response.raise_for_status()
             print(f"DEBUG: Field {field} updated successfully")
 
-        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
+         def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
             run_id = trigger_pipeline(config, pipeline_domain, model_id, dqn_params)
             config["run_id"] = run_id
             while True:
