@@ -75,21 +75,16 @@ implementation:
             return response.json()['runId']
 
         def get_pipeline_status(config, pipeline_domain):
-            print(f"DEBUG: Checking pipeline status for run ID: {config['run_id']}")
-            try:
-                http = get_retry_session()
-                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
-                headers = {'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}"}
-                response = http.get(url, headers=headers, timeout=30)
-                response.raise_for_status()
-                pipeline_status = response.json()
-                latest_state = pipeline_status['run_details']['state_history'][-1]
-                status = latest_state['state']
-                print(f"DEBUG: Pipeline status: {status}")
-                return status
-            except Exception as e:
-                print(f"ERROR: Failed to get pipeline status: {e}")
-                raise
+            http = get_retry_session()
+            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
+            headers = {'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}"}
+            print(f"Get pipeline status request URL: {url}, Headers: {headers}")
+            response = http.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            pipeline_status = response.json()
+            print(f"Get pipeline status. Status Code: {response.status_code}, Full response: {pipeline_status}")
+            latest_state = pipeline_status['run_details']['state_history'][-1]
+            return latest_state['state']
 
         def get_instance(access_token, domain, schema_id, model_id):
             print(f"DEBUG: Getting instance for model_id: {model_id}")
@@ -118,29 +113,19 @@ implementation:
             response.raise_for_status()
             print(f"DEBUG: Field {field} updated successfully")
 
-        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params, model_id):
-            print("DEBUG: Starting DQN pipeline trigger and wait")
-            try:
-                run_id = trigger_pipeline(config, pipeline_domain, dqn_params, model_id)
-                config["run_id"] = run_id
-                
-                max_wait_time = 1800  # 30 minutes
-                start_time = time.time()
-                check_count = 0
-                
-                while time.time() - start_time < max_wait_time:
-                    check_count += 1
-                    print(f"DEBUG: Status check #{check_count}")
-                    status = get_pipeline_status(config, pipeline_domain)
-                    
-                    if status == 'SUCCEEDED':
-                        print("DEBUG: DQN pipeline completed successfully")
-                        return True
-                    elif status in ['FAILED', 'ERROR', 'CANCELLED']:
-                        raise RuntimeError(f"DQN pipeline failed with status: {status}")
-                    
-                    print(f"DEBUG: Pipeline still running, waiting 30 seconds...")
-                    time.sleep(30)
+       def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
+            run_id = trigger_pipeline(config, pipeline_domain, model_id, dqn_params)
+            config["run_id"] = run_id
+            while True:
+                status = get_pipeline_status(config, pipeline_domain)
+                print(f"Current DQN pipeline status: {status}")
+                if status == 'SUCCEEDED':
+                    print("DQN Pipeline execution completed.")
+                    break
+                elif status in ['FAILED', 'ERROR']:
+                    raise RuntimeError(f"DQN Pipeline failed with status {status}")
+                time.sleep(60)
+
                 
                 raise RuntimeError("DQN pipeline timeout after 30 minutes")
             except Exception as e:
@@ -492,10 +477,10 @@ implementation:
                         "experiment_id": args.dqn_experiment_id,
                         "access_token": access_token
                     }
-                    
-                    dqn_success = trigger_and_wait_for_dqn_pipeline(
-                        dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
-                    )
+                    dqn_success = trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                    # dqn_success = trigger_and_wait_for_dqn_pipeline(
+                    #     dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
+                    # )
 
                     if dqn_success:
                         updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
