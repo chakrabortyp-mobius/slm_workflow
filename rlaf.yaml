@@ -1,35 +1,28 @@
-name: DQN RLAF Loop (LLM via GemmaTrainer, simplified outputs)
-description: >
-  Uses DQN to pick hyperparams, retrains Gemma LLM, evaluates from trainer report,
-  and saves best weights to a single retrained_model output. Other artifacts are
-  written next to that file automatically.
+name: Gemma3 DQN RLAF Loop
+description: Triggers the DQN RLAF pipeline in a loop to optimize Gemma3 LLM hyperparameters, controlled by a pierce_or_not flag.
 
 inputs:
   - {name: tokenizer_json, type: Model}
-  - {name: train_corpus,   type: Data}
-  - {name: model_config,   type: Data}
-  - {name: model_weights,  type: Model}
-  - {name: model_py_in,    type: Data}
-
-  # DQN / instance wiring
-  - {name: domain,            type: String}
-  - {name: schema_id,         type: String}
-  - {name: model_id,          type: String}
-  - {name: dqn_pipeline_id,   type: String}
+  - {name: train_corpus, type: Data}
+  - {name: model_config, type: Data}
+  - {name: model_weights, type: Model}
+  - {name: model_py_in, type: Data}
+  - {name: init_metrics, type: Metrics}
+  - {name: domain, type: String}
+  - {name: schema_id, type: String}
+  - {name: model_id, type: String}
+  - {name: dqn_pipeline_id, type: String}
+  - {name: pipeline_domain, type: String}
   - {name: dqn_experiment_id, type: String}
-  - {name: pipeline_domain,   type: String}
-  - {name: access_token,      type: string}
-
-  # Optional seed metrics (from your Evaluate brick)
-  - {name: init_metrics,      type: Metrics}
+  - {name: access_token, type: string}
 
 outputs:
-  - {name: rlaf_output,     type: Dataset}
+  - {name: rlaf_output, type: Dataset}
   - {name: retrained_model, type: Model}
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v19
+    image: nikhilv215/nesy-factory:v22
     command:
       - sh
       - -c
@@ -39,454 +32,580 @@ implementation:
       - -u
       - -c
       - |
-        import os, json, time, argparse, csv, math, requests, shutil
+        import os, json, time, argparse, math, numpy as np, shutil, importlib.util
+        import torch
+        import torch.nn.functional as F
+        from contextlib import nullcontext
+        from tokenizers import Tokenizer
+        from datasets import load_dataset
+        from tqdm import tqdm
+        import requests
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
-        from nesy_factory.language_model.train import GemmaTrainer
 
-        # ---------------- HTTP helpers ----------------
+        # ============================================================================
+        # HTTP/API Helper Functions (same as CNN)
+        # ============================================================================
         def get_retry_session():
-            retry = Retry(total=5, status_forcelist=[500,502,503,504], backoff_factor=1)
-            adapter = HTTPAdapter(max_retries=retry)
-            s = requests.Session()
-            s.mount("https://", adapter)
-            s.mount("http://",  adapter)
-            return s
+            retry_strategy = Retry(total=5, status_forcelist=[500, 502, 503, 504], backoff_factor=1)
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session = requests.Session()
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            return session
+
+        def trigger_pipeline(config, pipeline_domain, dqn_params=None, model_id=None):
+            print(f"DEBUG: Triggering DQN pipeline")
+            try:
+                http = get_retry_session()
+                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
+                
+                pipeline_params = {}
+                if dqn_params:
+                    pipeline_params["param_json"] = json.dumps(dqn_params)
+                if model_id:
+                    pipeline_params["model_id"] = model_id
+                    
+                payload = json.dumps({
+                    "pipelineType": "ML",
+                    "containerResources": {},
+                    "experimentId": config['experiment_id'],
+                    "enableCaching": True,
+                    "parameters": pipeline_params,
+                    "version": 1
+                })
+                headers = {
+                    'accept': 'application/json',
+                    'Authorization': f"Bearer {config['access_token']}",
+                    'Content-Type': 'application/json'
+                }
+                print(f"DEBUG: Request URL: {url}")
+                response = http.post(url, headers=headers, data=payload, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                run_id = result.get('runId')
+                if not run_id:
+                    raise RuntimeError(f"No runId in response: {result}")
+                print(f"DEBUG: DQN pipeline triggered. Run ID: {run_id}")
+                return run_id
+            except Exception as e:
+                print(f"ERROR: Failed to trigger DQN pipeline: {e}")
+                raise
+
+        def get_pipeline_status(config, pipeline_domain):
+            print(f"DEBUG: Checking pipeline status for run ID: {config['run_id']}")
+            try:
+                http = get_retry_session()
+                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
+                headers = {'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}"}
+                response = http.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                pipeline_status = response.json()
+                latest_state = pipeline_status['run_details']['state_history'][-1]
+                status = latest_state['state']
+                print(f"DEBUG: Pipeline status: {status}")
+                return status
+            except Exception as e:
+                print(f"ERROR: Failed to get pipeline status: {e}")
+                raise
 
         def get_instance(access_token, domain, schema_id, model_id):
+            print(f"DEBUG: Getting instance for model_id: {model_id}")
             http = get_retry_session()
             url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             payload = {"dbType": "TIDB", "ownedOnly": True, "filter": {"model_id": model_id}}
-            print(f"Get instance request URL: {url}, Headers: {headers}, Payload: {payload}")
-            r = http.post(url, headers=headers, json=payload, timeout=30)
-            r.raise_for_status()
-            print(f"Get instance. Status Code: {r.status_code}, Full response: {r.json()}")
-            return r.json()["content"][0]
+            response = http.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if not data['content']:
+                raise ValueError(f"No instance found for model_id: {model_id}")
+            return data['content'][0]
 
         def update_instance_field(access_token, domain, schema_id, model_id, field, value):
+            print(f"DEBUG: Updating instance field: {field}")
             http = get_retry_session()
             url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             payload = {
-                "dbType":"TIDB",
-                "conditionalFilter":{"conditions":[{"field":"model_id","operator":"EQUAL","value":model_id}]},
-                "partialUpdateRequests":[{"patch":[{"operation":"REPLACE","path":f"{field}","value":value}]}]
+                "dbType": "TIDB",
+                "conditionalFilter": {"conditions": [{"field": "model_id", "operator": "EQUAL", "value": model_id}]},
+                "partialUpdateRequests": [{"patch": [{"operation": "REPLACE", "path": f"{field}", "value": value}]}]
             }
-            print(f"Update instance field request - URL: {url}, Headers: {headers}, Payload: {json.dumps(payload)}")
-            headers_str = " ".join([f"-H '{k}: {v}'" for k, v in headers.items()])
-            print(f"curl -X PATCH '{url}' {headers_str} -d '{json.dumps(payload)}'")
-            r = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
-            r.raise_for_status()
-            print(f"Update instance field. Status Code: {r.status_code}, Full response: {r.json()}")
-            print(f"Successfully updated field '{field}' for model_id '{model_id}'")
+            response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+            response.raise_for_status()
+            print(f"DEBUG: Field {field} updated successfully")
 
-        #def trigger_pipeline(config, pipeline_domain, dqn_params=None):
-        def trigger_pipeline(config, pipeline_domain, model_id, dqn_params=None):
-            http = get_retry_session()
-            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
-            # parameters = {"param_json": json.dumps(dqn_params)} if dqn_params else {}
-            parameters = {"param_json": json.dumps(dqn_params), "model_id": model_id} if dqn_params else {"model_id": model_id}
-            payload = json.dumps({
-                "pipelineType":"ML",
-                "containerResources":{},
-                "experimentId":config["experiment_id"],
-                "enableCaching":True,
-                "parameters":parameters,
-                "version":1
-            })
-            headers={"accept":"application/json","Authorization":f"Bearer {config['access_token']}",
-                     "Content-Type":"application/json"}
-            print(f"Trigger pipeline request URL: {url}, Headers: {headers}, Payload: {payload}")
-            r = http.post(url, headers=headers, data=payload, timeout=30)
-            r.raise_for_status()
-            print(f"Triggered pipeline. Status Code: {r.status_code}, Response: {r.json()}")
-            return r.json()["runId"]
+        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params, model_id):
+            print("DEBUG: Starting DQN pipeline trigger and wait")
+            try:
+                run_id = trigger_pipeline(config, pipeline_domain, dqn_params, model_id)
+                config["run_id"] = run_id
+                
+                max_wait_time = 1800  # 30 minutes
+                start_time = time.time()
+                check_count = 0
+                
+                while time.time() - start_time < max_wait_time:
+                    check_count += 1
+                    print(f"DEBUG: Status check #{check_count}")
+                    status = get_pipeline_status(config, pipeline_domain)
+                    
+                    if status == 'SUCCEEDED':
+                        print("DEBUG: DQN pipeline completed successfully")
+                        return True
+                    elif status in ['FAILED', 'ERROR', 'CANCELLED']:
+                        raise RuntimeError(f"DQN pipeline failed with status: {status}")
+                    
+                    print(f"DEBUG: Pipeline still running, waiting 30 seconds...")
+                    time.sleep(30)
+                
+                raise RuntimeError("DQN pipeline timeout after 30 minutes")
+            except Exception as e:
+                print(f"ERROR: DQN pipeline execution failed: {e}")
+                raise
 
-        def get_pipeline_status(config, pipeline_domain):
-            http = get_retry_session()
-            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
-            headers={"accept":"application/json","Authorization":f"Bearer {config['access_token']}"}
-            print(f"Get pipeline status request URL: {url}, Headers: {headers}")
-            r = http.get(url, headers=headers, timeout=30)
-            r.raise_for_status()
-            pipeline_status = r.json()
-            print(f"Get pipeline status. Status Code: {r.status_code}, Full response: {pipeline_status}")
-            latest_state = pipeline_status["run_details"]["state_history"][-1]
-            return latest_state["state"]
+        # ============================================================================
+        # LLM Training Functions (from your training brick)
+        # ============================================================================
+        def choose_bin_dtype(vocab_size):
+            if vocab_size <= (1 << 16):  return np.uint16
+            if vocab_size <= (1 << 32):  return np.uint32
+            return np.uint64
 
-        # def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, dqn_params):
-        #     run_id = trigger_pipeline(config, pipeline_domain, dqn_params)
-        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
-            run_id = trigger_pipeline(config, pipeline_domain, model_id, dqn_params)
-            config["run_id"] = run_id
-            while True:
-                s = get_pipeline_status(config, pipeline_domain)
-                print(f"Current DQN pipeline status: {s}")
-                if s == "SUCCEEDED":
-                    print("DQN Pipeline execution completed.")
-                    break
-                if s in ["FAILED","ERROR"]:
-                    raise RuntimeError(f"DQN Pipeline failed with status {s}")
-                time.sleep(60)
+        def tokenize_to_bins(tokenizer_path, train_txt, val_fraction, num_proc):
+            print("DEBUG: Starting tokenization")
+            tok = Tokenizer.from_file(tokenizer_path)
+            vocab_size = tok.get_vocab_size()
+            BIN_DTYPE = choose_bin_dtype(vocab_size)
 
-        # ---------------- Metrics helpers ----------------
-        def load_metrics_from_report(report, curve):
-            metrics = {}
-            if os.path.exists(report):
-                try:
-                    with open(report,"r") as f:
-                        metrics = json.load(f)
-                except Exception as e:
-                    print("[warn] parse training_report:", e)
-            if os.path.exists(curve):
-                try:
-                    with open(curve,"r") as f:
-                        rows = list(csv.DictReader(f))
-                        if rows:
-                            last = rows[-1]
-                            for k,v in last.items():
-                                try:
-                                    metrics.setdefault(k, float(v))
-                                except:
-                                    pass
-                except Exception as e:
-                    print("[warn] parse loss_curve.csv:", e)
-            if "perplexity" not in metrics and "val_loss" in metrics:
-                try:
-                    metrics["perplexity"] = math.exp(float(metrics["val_loss"]))
-                except:
-                    pass
-            return metrics
+            ds_single = load_dataset("text", data_files={"train": train_txt})
+            split = ds_single["train"].train_test_split(test_size=float(val_fraction), seed=42)
+            ds = {"train": split["train"], "val": split["test"]}
 
-        def build_dqn_params(metrics_dict):
-            dqn = []
-            for key, value in metrics_dict.items():
-                try:
-                    float(value)
-                    # Determine sign based on metric name
-                    if "loss" in key.lower() or "perplexity" in key.lower():
-                        sign = "-"
-                    elif "accuracy" in key.lower() or "f1" in key.lower() or "bleu" in key.lower() or "rouge" in key.lower():
-                        sign = "+"
-                    else:
-                        continue  # Skip metrics we don't recognize
-                    dqn.append({"key": key, "sign": sign, "mul": 1.0})
-                except (ValueError, TypeError):
-                    print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
-            
-            # Return default if no valid metrics found
-            return dqn if dqn else [{"key":"perplexity","sign":"-","mul":1.0}]
+            def proc(ex):
+                ids = tok.encode(ex["text"]).ids
+                return {"ids": ids, "len": len(ids)}
 
-        # ---------------- Action handling ----------------
-        def coerce_action_params(action_params: dict) -> dict:
-            conv = {"learning_rate":float,"min_lr":float,"warmup_steps":int,"grad_accum":int,
-                    "epochs":int,"error_absolute_threshold":float}
-            out={}
-            for k,v in (action_params or {}).items():
-                try:
-                    out[k] = conv.get(k, lambda x:x)(v)
-                except:
-                    out[k] = v
-            if "epochs" in out and "max_iters" not in out:
-                out["max_iters"] = out["epochs"]
+            nproc = max(1, min(int(num_proc), (os.cpu_count() or 1)))
+            tokenized = {}
+            for sp, dset in ds.items():
+                tokenized[sp] = dset.map(proc, remove_columns=dset.column_names, desc=f"tokenizing {sp}", num_proc=nproc)
+
+            def write_split(dset, filename):
+                total = int(np.sum(dset["len"], dtype=np.uint64))
+                if total == 0: raise ValueError(f"{filename}: no tokens")
+                arr = np.memmap(filename, dtype=BIN_DTYPE, mode="w+", shape=(total,))
+                shard_size = max(1, len(dset) // 1024)
+                total_shards = max(1, (len(dset) + shard_size - 1) // shard_size)
+                idx = 0
+                for i in tqdm(range(total_shards), desc=f"writing {filename}"):
+                    start, stop = i * shard_size, min(len(dset), (i + 1) * shard_size)
+                    if start >= stop: continue
+                    batch = dset.select(range(start, stop)).with_format(type="numpy")
+                    ids_list = batch["ids"]
+                    if not ids_list: continue
+                    arr_batch = np.concatenate([np.asarray(x, dtype=BIN_DTYPE) for x in ids_list])
+                    arr[idx: idx + len(arr_batch)] = arr_batch
+                    idx += len(arr_batch)
+                arr.flush()
+                return total
+
+            train_tokens = write_split(tokenized["train"], "train.bin")
+            val_tokens = write_split(tokenized["val"], "val.bin")
+
+            meta = {"vocab_size": vocab_size, "train_tokens": int(train_tokens), 
+                    "val_tokens": int(val_tokens), "bin_dtype": str(BIN_DTYPE.__name__)}
+            with open("bin_meta.json", "w") as f: json.dump(meta, f, indent=2)
+            print(f"DEBUG: Tokenization complete. Train: {train_tokens}, Val: {val_tokens}")
+            return meta
+
+        def make_get_batch(device, device_type, block_size, batch_size):
+            with open("bin_meta.json", "r") as f:
+                meta = json.load(f)
+            dtype_map = {"uint16": np.uint16, "uint32": np.uint32, "uint64": np.uint64}
+            BIN_DTYPE = dtype_map[meta["bin_dtype"]]
+            TRAIN_BIN, VAL_BIN = "train.bin", "val.bin"
+
+            def get_batch(split):
+                path = TRAIN_BIN if split == "train" else VAL_BIN
+                data = np.memmap(path, dtype=BIN_DTYPE, mode="r")
+                if len(data) <= block_size:
+                    raise ValueError(f"{path}: not enough tokens")
+                ix = torch.randint(len(data) - block_size - 1, (batch_size,))
+                x = torch.stack([torch.from_numpy(np.asarray(data[i:i+block_size], dtype=np.int64)) for i in ix])
+                y = torch.stack([torch.from_numpy(np.asarray(data[i+1:i+block_size+1], dtype=np.int64)) for i in ix])
+                if device_type == "cuda":
+                    x = x.pin_memory().to(device, non_blocking=True)
+                    y = y.pin_memory().to(device, non_blocking=True)
+                else:
+                    x, y = x.to(device), y.to(device)
+                return x, y
+            return get_batch
+
+        def estimate_loss(model, get_batch, eval_iters, ctx):
+            out = {}
+            model.eval()
+            with torch.inference_mode():
+                for split in ["train", "val"]:
+                    losses = torch.zeros(eval_iters, device="cpu")
+                    for k in range(eval_iters):
+                        X, Y = get_batch(split)
+                        with ctx:
+                            _, loss = model(X, Y)
+                        losses[k] = loss.item()
+                    out[split] = losses.mean().item()
+            model.train()
             return out
 
-        def resolve(param, action, cfg, defaults):
-            if param in action: return action[param]
-            if param in cfg:    return cfg[param]
-            return defaults.get(param)
+        def find_model_py_file(directory):
+            if os.path.isfile(directory):
+                return directory
+            py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".py")]
+            if not py_files:
+                raise FileNotFoundError(f"No .py file in {directory}")
+            return py_files[0]
 
-        def pick_threshold_violation(metrics, err_thresh):
-            if err_thresh is None:
-                return (False, None, None)
-            try:
-                thr = float(err_thresh)
-            except:
-                return (False, None, None)
-            key = "perplexity" if "perplexity" in metrics else ("val_loss" if thr < 1.0 and "val_loss" in metrics else None)
-            if key and key in metrics:
-                try:
-                    val = float(metrics[key])
-                    return (val > thr, key, val)
-                except:
-                    return (False, key, None)
-            return (False, None, None)
+        def load_model_class_from_file(py_path, class_name="Gemma3Model"):
+            if not py_path.endswith('.py'):
+                temp_py_path = py_path + '.py'
+                shutil.copyfile(py_path, temp_py_path)
+                py_path = temp_py_path
+            spec = importlib.util.spec_from_file_location("gemma3_model", py_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec from {py_path}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if not hasattr(mod, class_name):
+                raise AttributeError(f"{py_path} does not define {class_name}")
+            return getattr(mod, class_name)
 
-        # ---------------- Training wrapper ----------------
-        def train_llm_with_action(action_params, paths, defaults, out_dir):
+        # ============================================================================
+        # Main Training Function with DQN Action
+        # ============================================================================
+        def train_llm_with_action(action_params, paths, output_model_path, previous_metrics, dqn_params):
+            print("DEBUG: Starting LLM training with DQN action")
+            print(f"DEBUG: Action params: {action_params}")
+            
+            # Load model config
             with open(paths["model_config"], "r") as f:
-                base_cfg = json.load(f)
+                cfg = json.load(f)
+            cfg["dtype"] = torch.float16 if str(cfg.get("dtype")) == "float16" else torch.float32
 
-            coerced = coerce_action_params(action_params)
-            err_thresh = coerced.get("error_absolute_threshold")
+            # Extract hyperparameters from action (DQN recommendations)
+            learning_rate = float(action_params.get("learning_rate", 1e-4))
+            min_lr = float(action_params.get("min_lr", 1e-5))
+            warmup_steps = int(action_params.get("warmup_steps", 1000))
+            grad_accum = int(action_params.get("grad_accum", 32))
+            max_iters = int(action_params.get("max_iters", 10000))
+            batch_size = int(action_params.get("batch_size", 32))
+            block_size = int(action_params.get("block_size", 128))
+            eval_interval = int(action_params.get("eval_interval", 1000))
+            eval_iters = int(action_params.get("eval_iters", 500))
+            weight_decay = float(action_params.get("weight_decay", 0.1))
+            beta2 = float(action_params.get("beta2", 0.95))
+            clip_grad_norm = float(action_params.get("clip_grad_norm", 0.5))
+            val_fraction = float(action_params.get("val_fraction", 0.1))
+            num_proc = int(action_params.get("num_proc", 8))
 
-            # Fixed filenames next to retrained_model
-            model_py_out     = os.path.join(out_dir, "gemma3_model.out.py")
-            best_weights     = os.path.join(out_dir, "best.pt")
-            final_weights    = os.path.join(out_dir, "final.pt")
-            training_report  = os.path.join(out_dir, "training_report.json")
-            loss_curve_csv   = os.path.join(out_dir, "loss_curve.csv")
+            print(f"DEBUG: Training hyperparameters - lr={learning_rate}, warmup={warmup_steps}, grad_accum={grad_accum}")
 
-            os.makedirs(out_dir, exist_ok=True)
+            # Setup device
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device_type = "cuda" if device == "cuda" else "cpu"
+            print(f"DEBUG: Using device: {device}")
 
-            kwargs = {
-                "learning_rate": resolve("learning_rate", coerced, base_cfg, defaults),
-                "min_lr":        resolve("min_lr",        coerced, base_cfg, defaults),
-                "warmup_steps":  resolve("warmup_steps",  coerced, base_cfg, defaults),
-                "grad_accum":    resolve("grad_accum",    coerced, base_cfg, defaults),
-                "max_iters":     resolve("max_iters",     coerced, base_cfg, defaults),
-                "batch_size":    resolve("batch_size",    coerced, base_cfg, defaults),
-                "block_size":    resolve("block_size",    coerced, base_cfg, defaults),
-                "eval_interval": resolve("eval_interval", coerced, base_cfg, defaults),
-                "eval_iters":    resolve("eval_iters",    coerced, base_cfg, defaults),
-                "weight_decay":  resolve("weight_decay",  coerced, base_cfg, defaults),
-                "beta2":         resolve("beta2",         coerced, base_cfg, defaults),
-                "clip_grad_norm":resolve("clip_grad_norm",coerced, base_cfg, defaults),
-                "val_fraction":  resolve("val_fraction",  coerced, base_cfg, defaults),
-                "num_proc":      resolve("num_proc",      coerced, base_cfg, defaults),
+            # Load model
+            model_py_path = find_model_py_file(paths["model_py_in"])
+            Gemma3Model = load_model_class_from_file(model_py_path, "Gemma3Model")
+            model = Gemma3Model(cfg).to(device)
+            state = torch.load(paths["model_weights"], map_location=device)
+            model.load_state_dict(state, strict=True)
+            model.train()
+            print("DEBUG: Model loaded successfully")
 
-                "tokenizer_json": paths["tokenizer_json"],
-                "train_corpus":   paths["train_corpus"],
-                "model_config":   paths["model_config"],
-                "model_weights":  paths["model_weights"],
-                "model_py_in":    paths["model_py_in"],
-                "model_py_out":   model_py_out,
-                "best_weights":   best_weights,
-                "final_weights":  final_weights,
-                "training_report":training_report,
-                "loss_curve_csv": loss_curve_csv,
+            # Setup mixed precision
+            ptdtype = torch.bfloat16 if (device_type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+            ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+            scaler = torch.cuda.amp.GradScaler(enabled=(device_type == "cuda" and ptdtype == torch.float16))
+
+            # Tokenize data
+            meta = tokenize_to_bins(paths["tokenizer_json"], paths["train_corpus"], val_fraction, num_proc)
+            get_batch = make_get_batch(device, device_type, block_size, batch_size)
+
+            # Setup optimizer and scheduler
+            optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, beta2),
+                                          weight_decay=weight_decay, eps=1e-9)
+            from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
+            total_updates = math.ceil(max_iters / max(1, grad_accum))
+            warm_updates = min(warmup_steps, max(1, total_updates))
+            sched_warm = LinearLR(optimizer, total_iters=warm_updates)
+            sched_cos = CosineAnnealingLR(optimizer, T_max=max(1, total_updates - warm_updates), eta_min=min_lr)
+            scheduler = SequentialLR(optimizer, schedulers=[sched_warm, sched_cos], milestones=[warm_updates])
+
+            print("DEBUG: Starting training loop")
+            best_val = float("inf")
+            updates = 0
+
+            pbar = tqdm(range(max_iters), desc="Training")
+            for step in pbar:
+                X, Y = get_batch("train")
+                with ctx:
+                    _, loss = model(X, Y)
+                    (loss / grad_accum).backward()
+
+                if ((step + 1) % grad_accum == 0) or (step + 1 == max_iters):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+                    if scaler.is_enabled():
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
+                    updates += 1
+
+                    if updates % max(1, eval_interval) == 0:
+                        losses = estimate_loss(model, get_batch, eval_iters, ctx)
+                        pbar.set_postfix(train=f"{losses['train']:.4f}", val=f"{losses['val']:.4f}")
+                        if losses["val"] < best_val:
+                            best_val = losses["val"]
+
+            print(f"DEBUG: Training completed. Best val loss: {best_val}")
+
+            # Calculate metrics
+            final_losses = estimate_loss(model, get_batch, eval_iters, ctx)
+            perplexity = math.exp(final_losses["val"]) if final_losses["val"] < 10 else 9999.0
+            
+            metrics = {
+                "val_loss": final_losses["val"],
+                "train_loss": final_losses["train"],
+                "perplexity": perplexity,
+                "bleu_score": 0.0,  # Placeholder - you can compute if needed
+                "rouge_score": 0.0  # Placeholder - you can compute if needed
             }
+            print(f"DEBUG: Final metrics: {metrics}")
 
-            print("[GemmaTrainer.run kwargs]", json.dumps({k:kwargs[k] for k in sorted(kwargs)}, indent=2))
-            GemmaTrainer().run(**kwargs)
+            # Calculate improvement
+            improvement_score = 0.0
+            for param in dqn_params:
+                key = param['key']
+                sign = 1 if param['sign'] == '+' else -1
+                if key in metrics and key in previous_metrics:
+                    improvement = (metrics[key] - previous_metrics[key]) * sign
+                    improvement_score += improvement * param.get('mul', 1.0)
+                    print(f"DEBUG: {key}: current={metrics[key]:.4f}, previous={previous_metrics[key]:.4f}, improvement={improvement:.4f}")
 
-            metrics = load_metrics_from_report(training_report, loss_curve_csv)
-            return metrics, err_thresh, best_weights
+            print(f"DEBUG: Total improvement score: {improvement_score:.4f}")
 
-        # ---------------- Main ----------------
+            # Save model
+            os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
+            if improvement_score > 0:
+                print("DEBUG: Improvement detected - saving retrained model")
+                torch.save(model.state_dict(), output_model_path)
+            else:
+                print("DEBUG: No improvement - saving original model")
+                torch.save(state, output_model_path)
+
+            return {"metrics": metrics, "model_path": output_model_path}
+
+        # ============================================================================
+        # Main Function
+        # ============================================================================
         def main():
-            ap = argparse.ArgumentParser()
-            # inputs
-            ap.add_argument("--tokenizer_json", required=True)
-            ap.add_argument("--train_corpus",   required=True)
-            ap.add_argument("--model_config",   required=True)
-            ap.add_argument("--model_weights",  required=True)
-            ap.add_argument("--model_py_in",    required=True)
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--tokenizer-json', type=str, required=True)
+            parser.add_argument('--train-corpus', type=str, required=True)
+            parser.add_argument('--model-config', type=str, required=True)
+            parser.add_argument('--model-weights', type=str, required=True)
+            parser.add_argument('--model-py-in', type=str, required=True)
+            parser.add_argument('--init-metrics', type=str, required=True)
+            parser.add_argument('--domain', type=str, required=True)
+            parser.add_argument('--schema-id', type=str, required=True)
+            parser.add_argument('--model-id', type=str, required=True)
+            parser.add_argument('--dqn-pipeline-id', type=str, required=True)
+            parser.add_argument('--dqn-experiment-id', type=str, required=True)
+            parser.add_argument('--access-token', type=str, required=True)
+            parser.add_argument('--pipeline-domain', type=str, required=True)
+            parser.add_argument('--rlaf-output', type=str, required=True)
+            parser.add_argument('--retrained-model', type=str, required=True)
+            args = parser.parse_args()
 
-            ap.add_argument("--domain", required=True)
-            ap.add_argument("--schema_id", required=True)
-            ap.add_argument("--model_id", required=True)
-            ap.add_argument("--dqn_pipeline_id", required=True)
-            ap.add_argument("--dqn_experiment_id", required=True)
-            ap.add_argument("--pipeline_domain", required=True)
-            ap.add_argument("--access_token", required=True)
+            print("DEBUG: Starting Gemma3 RLAF Loop")
 
-            # outputs (defaults enable local runs; orchestrator overrides via outputPath)
-            ap.add_argument("--rlaf_output", default="./out/rlaf_output.json")
-            ap.add_argument("--retrained_model", default="./out/retrained_model.pt")
-
-            # optional seed metrics
-            ap.add_argument("--init_metrics")
-            args = ap.parse_args()
-
-            os.makedirs(os.path.dirname(args.rlaf_output) or ".", exist_ok=True)
-            os.makedirs(os.path.dirname(args.retrained_model) or ".", exist_ok=True)
-
-            with open(args.access_token,"r") as f:
+            # Load access token
+            with open(args.access_token, 'r') as f:
                 access_token = f.read().strip()
 
-            # Load initial metrics (handle both KFP format and plain dict)
-            current_metrics = {}
-            if args.init_metrics and os.path.exists(args.init_metrics):
-                try:
-                    with open(args.init_metrics,"r") as f:
-                        data = json.load(f)
-                    
-                    # Check if it's KFP metrics format
-                    if "metrics" in data and isinstance(data["metrics"], list):
-                        # Convert KFP format to plain dict
-                        for metric in data["metrics"]:
-                            current_metrics[metric["name"]] = metric["numberValue"]
-                    else:
-                        # Assume it's already a plain dict
-                        current_metrics = data
-                    
-                    print(f"[INFO] Loaded initial metrics: {current_metrics}")
-                except Exception as e:
-                    print(f"[warn] parse init_metrics: {e}")
-
-            defaults = {
-                "learning_rate": 1e-4, "min_lr": 1e-5, "warmup_steps": 1,
-                "max_iters": 6, "batch_size": 8, "block_size": 64, "grad_accum": 1,
-                "eval_interval": 1, "eval_iters": 5, "weight_decay": 0.1, "beta2": 0.95,
-                "clip_grad_norm": 0.5, "val_fraction": 0.1, "num_proc": 6
-            }
-
-            paths = {
-                "tokenizer_json": args.tokenizer_json,
-                "train_corpus":   args.train_corpus,
-                "model_config":   args.model_config,
-                "model_weights":  args.model_weights,
-                "model_py_in":    args.model_py_in,
-            }
-
-            out_dir = os.path.dirname(args.retrained_model) or "."
-
-            action_id_for_next_pierce = -1
+            # Load initial metrics
+            with open(args.init_metrics, 'r') as f:
+                current_metrics_data = json.load(f)
             
-            for iteration in range(2):
-                print(f"=" * 80)
-                print(f" RLAF Loop Iteration {iteration + 1}")
-                print(f"=" * 80)
-                
-                # Clean and prepare metrics for DQN
-                cleaned_metrics = {}
-                fixed_keys = [("bleu_score", "+"), ("rouge_score", "+"), ("perplexity", "-")]
-                for k, _ in fixed_keys:
-                  cleaned_metrics.setdefault(k, 0.0)  # If 'perplexity' is missing, it will be set to 0.0
-
-                dqn_params = [{"key": k, "sign": s, "mul": 1.0} for k, s in fixed_keys]
-                # cleaned_metrics = {}
-                # for key, value in current_metrics.items():
-                #     try:
-                #         cleaned_metrics[key] = float(value)
-                #     except (ValueError, TypeError):
-                #         print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
-                
-                # dqn_params = build_dqn_params(cleaned_metrics)
-                print(f"Dynamically generated param_json for DQN: {json.dumps(dqn_params)}")
-
-                # Get current instance state
-                inst = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                print(f"Current instance: {inst}")
-                
-                if inst.get("pierce2rlaf"):
-                    last = inst["pierce2rlaf"][-1]
-                    previous_state = last.get("current_state", cleaned_metrics)
-                    episode = last.get("episode", 0)
+            # Parse metrics (handle KFP format or plain dict)
+            current_metrics = {}
+            if isinstance(current_metrics_data, dict):
+                if "metrics" in current_metrics_data and isinstance(current_metrics_data["metrics"], list):
+                    for metric in current_metrics_data["metrics"]:
+                        current_metrics[metric["name"]] = metric["numberValue"]
                 else:
-                    previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
-                    episode = 0
+                    current_metrics = current_metrics_data
+            
+            print(f"DEBUG: Initial metrics: {current_metrics}")
 
-                # Update pierce2rlaf with current state
-                new_entry = {
-                    "action_id": action_id_for_next_pierce,
-                    "previous_state": previous_state,
-                    "current_state": cleaned_metrics,
-                    "episode": episode,
-                    "timestamp": int(time.time())
-                }
-                hist = inst.get("pierce2rlaf", [])
-                hist.append(new_entry)
-                update_instance_field(access_token, args.domain, args.schema_id, args.model_id, "pierce2rlaf", hist)
+            # FIXED DQN PARAMETERS (matching your requirements)
+            fixed_dqn_params = [
+                {"key": "bleu_score", "sign": "+", "mul": 1.0},
+                {"key": "rouge_score", "sign": "+", "mul": 1.0},
+                {"key": "perplexity", "sign": "-", "mul": 1.0}
+            ]
+
+            # Main RLAF loop (2 iterations)
+            for iteration in range(2):
+                print(f"\n{'='*80}")
+                print(f"RLAF Loop Iteration {iteration + 1}")
+                print(f"{'='*80}\n")
+
+                # Prepare metrics for DQN (use fixed keys)
+                cleaned_metrics = {}
+                for param in fixed_dqn_params:
+                    key = param['key']
+                    cleaned_metrics[key] = current_metrics.get(key, 0.0)
+
+                print(f"DEBUG: Metrics for DQN: {cleaned_metrics}")
+                print(f"DEBUG: DQN parameters: {fixed_dqn_params}")
+
+                # Get instance and update pierce2rlaf
+                try:
+                    instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                    
+                    if instance.get('pierce2rlaf'):
+                        latest_pierce2rlaf = instance['pierce2rlaf'][-1]
+                        previous_state = latest_pierce2rlaf.get('current_state', cleaned_metrics)
+                    else:
+                        previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
+
+                    new_pierce2rlaf_entry = {
+                        "action_id": -1,
+                        "previous_state": previous_state,
+                        "current_state": cleaned_metrics,
+                        "episode": iteration,
+                        "timestamp": int(time.time())
+                    }
+
+                    pierce2rlaf_history = instance.get("pierce2rlaf", [])
+                    pierce2rlaf_history.append(new_pierce2rlaf_entry)
+                    update_instance_field(access_token, args.domain, args.schema_id, args.model_id,
+                                        "pierce2rlaf", pierce2rlaf_history)
+                    print("DEBUG: Database updated with pierce2rlaf")
+
+                except Exception as e:
+                    print(f"ERROR: Database update failed: {e}")
+                    raise
 
                 # Trigger DQN pipeline
-                dqn_cfg = {
-                    "pipeline_id": args.dqn_pipeline_id,
-                    "experiment_id": args.dqn_experiment_id,
-                    "access_token": access_token
+                try:
+                    dqn_config = {
+                        "pipeline_id": args.dqn_pipeline_id,
+                        "experiment_id": args.dqn_experiment_id,
+                        "access_token": access_token
+                    }
+                    
+                    dqn_success = trigger_and_wait_for_dqn_pipeline(
+                        dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
+                    )
+
+                    if dqn_success:
+                        updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                        
+                        if updated_instance.get('rlaf2pierce'):
+                            latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
+                            print(f"DEBUG: DQN recommendation: {latest_rlaf2pierce}")
+
+                            if not latest_rlaf2pierce.get("pierce_or_not", True):
+                                print("DEBUG: pierce_or_not is false. Stopping RLAF loop.")
+                                break
+
+                            rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
+                            action_id = latest_rlaf2pierce['action_id']
+                            action_details = next((a for a in rlaf_actions if a["id"] == action_id), None)
+
+                            if not action_details:
+                                raise ValueError(f"Action ID {action_id} not found")
+
+                            action_to_use = action_details['params']
+                            print(f"DEBUG: Using DQN action: {action_to_use}")
+                        else:
+                            raise ValueError("No rlaf2pierce data from DQN")
+                    else:
+                        raise RuntimeError("DQN pipeline failed")
+
+                except Exception as e:
+                    print(f"ERROR: DQN pipeline error: {e}")
+                    raise
+
+                # Retrain with DQN action
+                print(f"DEBUG: Starting retraining with action: {action_to_use}")
+                paths = {
+                    "tokenizer_json": args.tokenizer_json,
+                    "train_corpus": args.train_corpus,
+                    "model_config": args.model_config,
+                    "model_weights": args.model_weights,
+                    "model_py_in": args.model_py_in
                 }
-                print(f"DQN Config: {dqn_cfg}")
-                trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, args.model_id, dqn_params)
-                # trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
 
-                # Get DQN recommendation
-                updated = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                print(f"{updated}")
-                latest = updated["rlaf2pierce"][-1]
-                
-                if not latest.get("pierce_or_not", True):
-                    print("pierce_or_not is false. Exiting loop.")
-                    break
+                retraining_results = train_llm_with_action(
+                    action_to_use, paths, args.retrained_model, previous_state, fixed_dqn_params
+                )
 
-                print(f"Latest rlaf2pierce: {latest}")
-                
-                action_id_for_next_pierce = latest["action_id"]
-                actions = updated.get("rlaf_actions", {}).get("actions", [])
-                action = next((a for a in actions if a.get("id") == action_id_for_next_pierce), None)
-                if not action:
-                    raise ValueError(f"Action with ID {action_id_for_next_pierce} not found in rlaf_actions")
+                current_metrics = retraining_results["metrics"]
+                print(f"DEBUG: Retraining completed. New metrics: {current_metrics}")
 
-                print(f"DQN pipeline recommended action: {action}. Retraining model.")
-                
-                # Train with recommended action
-                metrics, err_thresh, best_path = train_llm_with_action(action.get("params", {}), paths, defaults, out_dir)
+            # Save final output
+            print("DEBUG: Saving final results")
+            os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
+            final_output = {
+                "final_metrics": current_metrics,
+                "model_type": "Gemma3_LLM",
+                "iterations_completed": iteration + 1,
+                "timestamp": time.time()
+            }
 
-                # Calculate improvement score
-                improvement_score = 0.0
-                for p in dqn_params:
-                    k = p["key"]
-                    sign = 1 if p["sign"] == "+" else -1
-                    if k in metrics and k in previous_state:
-                        try:
-                            improvement = (float(metrics[k]) - float(previous_state[k])) * sign
-                            improvement_score += improvement
-                        except:
-                            pass
+            with open(args.rlaf_output, 'w') as f:
+                json.dump(final_output, f, indent=2)
 
-                # Check threshold violation
-                viol, key_used, val_used = pick_threshold_violation(metrics, err_thresh)
-                if key_used is not None:
-                    print(f"[Gate] {key_used}={val_used} vs threshold={err_thresh} → {'VIOLATE' if viol else 'OK'}")
+            print(f"DEBUG: RLAF loop completed. Results saved to: {args.rlaf_output}")
 
-                # Decide whether to keep model
-                if improvement_score > 0 and not viol:
-                    print(f"Metrics improved (score: {improvement_score:.4f}). Saving model.")
-                    if os.path.abspath(best_path) != os.path.abspath(args.retrained_model):
-                        shutil.copy2(best_path, args.retrained_model)
-                    print(f"Saved retrained model to {args.retrained_model}")
-                else:
-                    reason = "no improvement" if improvement_score <= 0 else "threshold violated"
-                    print(f"No improvement in metrics (reason: {reason}, score: {improvement_score:.4f}). Model not saved.")
-                    os.makedirs(os.path.dirname(args.retrained_model), exist_ok=True)
-                    with open(args.retrained_model, "w") as f:
-                        f.write("Model not saved due to lack of improvement.")
-
-                current_metrics = metrics
-
-            # Write final output
-            with open(args.rlaf_output,"w") as f:
-                json.dump({"final_metrics": current_metrics}, f, indent=4)
-            print(f"RLAF loop finished. Final parameters written to {args.rlaf_output}")
-
-        if __name__ == "__main__":
+        if __name__ == '__main__':
             main()
     args:
-      # inputs (read-only)
-      - --tokenizer_json
+      - --tokenizer-json
       - {inputPath: tokenizer_json}
-      - --train_corpus
+      - --train-corpus
       - {inputPath: train_corpus}
-      - --model_config
+      - --model-config
       - {inputPath: model_config}
-      - --model_weights
+      - --model-weights
       - {inputPath: model_weights}
-      - --model_py_in
+      - --model-py-in
       - {inputPath: model_py_in}
-
-      # dqn wiring
+      - --init-metrics
+      - {inputPath: init_metrics}
       - --domain
       - {inputValue: domain}
-      - --schema_id
+      - --schema-id
       - {inputValue: schema_id}
-      - --model_id
+      - --model-id
       - {inputValue: model_id}
-      - --dqn_pipeline_id
+      - --dqn-pipeline-id
       - {inputValue: dqn_pipeline_id}
-      - --dqn_experiment_id
+      - --dqn-experiment-id
       - {inputValue: dqn_experiment_id}
-      - --pipeline_domain
-      - {inputValue: pipeline_domain}
-      - --access_token
+      - --access-token
       - {inputPath: access_token}
-
-      # simplified outputs (writable; orchestrator injects paths)
-      - --rlaf_output
+      - --pipeline-domain
+      - {inputValue: pipeline_domain}
+      - --rlaf-output
       - {outputPath: rlaf_output}
-      - --retrained_model
+      - --retrained-model
       - {outputPath: retrained_model}
-
-      # optional seed metrics
-      - --init_metrics
-      - {inputPath: init_metrics}
+      
