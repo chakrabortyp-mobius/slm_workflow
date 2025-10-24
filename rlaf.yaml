@@ -54,43 +54,25 @@ implementation:
             session.mount("http://", adapter)
             return session
 
-        def trigger_pipeline(config, pipeline_domain, dqn_params=None, model_id=None):
-            print(f"DEBUG: Triggering DQN pipeline")
-            try:
-                http = get_retry_session()
-                url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
-                
-                pipeline_params = {}
-                if dqn_params:
-                    pipeline_params["param_json"] = json.dumps(dqn_params)
-                if model_id:
-                    pipeline_params["model_id"] = model_id
-                    
-                payload = json.dumps({
-                    "pipelineType": "ML",
-                    "containerResources": {},
-                    "experimentId": config['experiment_id'],
-                    "enableCaching": True,
-                    "parameters": pipeline_params,
-                    "version": 1
-                })
-                headers = {
-                    'accept': 'application/json',
-                    'Authorization': f"Bearer {config['access_token']}",
-                    'Content-Type': 'application/json'
-                }
-                print(f"DEBUG: Request URL: {url}")
-                response = http.post(url, headers=headers, data=payload, timeout=30)
-                response.raise_for_status()
-                result = response.json()
-                run_id = result.get('runId')
-                if not run_id:
-                    raise RuntimeError(f"No runId in response: {result}")
-                print(f"DEBUG: DQN pipeline triggered. Run ID: {run_id}")
-                return run_id
-            except Exception as e:
-                print(f"ERROR: Failed to trigger DQN pipeline: {e}")
-                raise
+        def trigger_pipeline(config, pipeline_domain, model_id, dqn_params=None):
+            http = get_retry_session()
+            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
+            pipeline_params = {"param_json": json.dumps(dqn_params)} if dqn_params else {}
+            pipeline_params = {"param_json": json.dumps(dqn_params), "model_id": model_id} if dqn_params else {"model_id": model_id}
+            payload = json.dumps({
+                "pipelineType": "ML", "containerResources": {}, "experimentId": config['experiment_id'],
+                "enableCaching": True, "parameters": pipeline_params, "version": 1
+            })
+            print(f"{payload}")
+            headers = {
+                'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}",
+                'Content-Type': 'application/json'
+            }
+            print(f"Trigger pipeline request URL: {url}, Headers: {headers}, Payload: {payload}")
+            response = http.post(url, headers=headers, data=payload, timeout=30)
+            response.raise_for_status()
+            print(f"Triggered pipeline. Status Code: {response.status_code}, Response: {response.json()}")
+            return response.json()['runId']
 
         def get_pipeline_status(config, pipeline_domain):
             print(f"DEBUG: Checking pipeline status for run ID: {config['run_id']}")
