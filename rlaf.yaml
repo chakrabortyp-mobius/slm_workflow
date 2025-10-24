@@ -86,7 +86,7 @@ implementation:
             http = get_retry_session()
             url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
             # parameters = {"param_json": json.dumps(dqn_params)} if dqn_params else {}
-            pipeline_params = {"param_json": json.dumps(dqn_params), "model_id": model_id} if dqn_params else {"model_id": model_id}
+            parameters = {"param_json": json.dumps(dqn_params), "model_id": model_id} if dqn_params else {"model_id": model_id}
             payload = json.dumps({
                 "pipelineType":"ML",
                 "containerResources":{},
