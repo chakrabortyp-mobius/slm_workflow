@@ -388,7 +388,7 @@ implementation:
                     "access_token": access_token
                 }
                 print(f"DQN Config: {dqn_cfg}")
-                trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, args.model_id, dqn_params)
                 # trigger_and_wait_for_dqn_pipeline(dqn_cfg, args.pipeline_domain, dqn_params)
 
                 # Get DQN recommendation
