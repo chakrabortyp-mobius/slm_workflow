@@ -127,10 +127,6 @@ implementation:
                 time.sleep(60)
 
                 
-                raise RuntimeError("DQN pipeline timeout after 30 minutes")
-            except Exception as e:
-                print(f"ERROR: DQN pipeline execution failed: {e}")
-                raise
 
         # ============================================================================
         # LLM Training Functions (from your training brick)
