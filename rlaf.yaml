@@ -457,10 +457,13 @@ implementation:
                 # Get instance and update pierce2rlaf
                 try:
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                    
                     if instance.get('pierce2rlaf'):
+                        # latest_pierce2rlaf = instance['pierce2rlaf'][-1]
+                        # previous_state = latest_pierce2rlaf.get('current_state', cleaned_metrics)
                         latest_pierce2rlaf = instance['pierce2rlaf'][-1]
-                        previous_state = latest_pierce2rlaf.get('current_state', cleaned_metrics)
+                        previous_state = latest_pierce2rlaf['current_state']
+                        episode = latest_pierce2rlaf['episode']
+                        
                     else:
                         previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
 
