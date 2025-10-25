@@ -394,8 +394,7 @@ implementation:
             parser.add_argument('--retrained-model', type=str, required=True)
             args = parser.parse_args()
 
-            try:
-                print("DEBUG: Starting Gemma3 RLAF Loop")
+            print("DEBUG: Starting Gemma3 RLAF Loop")
 
             # Load access token
             with open(args.access_token, 'r') as f:
@@ -425,9 +424,7 @@ implementation:
 
             # Main RLAF loop (2 iterations)
             for iteration in range(2):
-                
                 print(f"RLAF Loop Iteration {iteration + 1}")
-                
 
                 # Prepare metrics for DQN (use fixed keys)
                 cleaned_metrics = {}
@@ -441,10 +438,13 @@ implementation:
                 # Get instance and update pierce2rlaf
                 try:
                     instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                    
                     if instance.get('pierce2rlaf'):
+                        # latest_pierce2rlaf = instance['pierce2rlaf'][-1]
+                        # previous_state = latest_pierce2rlaf.get('current_state', cleaned_metrics)
                         latest_pierce2rlaf = instance['pierce2rlaf'][-1]
-                        previous_state = latest_pierce2rlaf.get('current_state', cleaned_metrics)
+                        previous_state = latest_pierce2rlaf['current_state']
+                        episode = latest_pierce2rlaf['episode']
+                        
                     else:
                         previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
 
@@ -473,10 +473,10 @@ implementation:
                         "experiment_id": args.dqn_experiment_id,
                         "access_token": access_token
                     }
-                    
-                    dqn_success = trigger_and_wait_for_dqn_pipeline(
-                        dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
-                    )
+                    dqn_success = trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, fixed_dqn_params)
+                    # dqn_success = trigger_and_wait_for_dqn_pipeline(
+                    #     dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
+                    # )
 
                     if dqn_success:
                         updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
@@ -538,15 +538,6 @@ implementation:
                 json.dump(final_output, f, indent=2)
 
             print(f"DEBUG: RLAF loop completed. Results saved to: {args.rlaf_output}")
-
-            except Exception as e:
-                print(f"ERROR: Fatal error in RLAF loop: {e}")
-                import traceback
-                traceback.print_exc()
-                ensure_output_files(args.rlaf_output, args.retrained_model)
-                raise
-            finally:
-                ensure_output_files(args.rlaf_output, args.retrained_model)
 
         if __name__ == '__main__':
             main()
