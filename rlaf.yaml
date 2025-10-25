@@ -425,9 +425,9 @@ implementation:
 
             # Main RLAF loop (2 iterations)
             for iteration in range(2):
-                
+                print(f"\n{'='*80}")
                 print(f"RLAF Loop Iteration {iteration + 1}")
-                
+                print(f"{'='*80}\n")
 
                 # Prepare metrics for DQN (use fixed keys)
                 cleaned_metrics = {}
