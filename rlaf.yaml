@@ -467,47 +467,30 @@ implementation:
                     raise
 
                 # Trigger DQN pipeline
-                try:
-                    dqn_config = {
-                        "pipeline_id": args.dqn_pipeline_id,
-                        "experiment_id": args.dqn_experiment_id,
-                        "access_token": access_token
-                    }
-                    dqn_success = trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, fixed_dqn_params)
-                    # dqn_success = trigger_and_wait_for_dqn_pipeline(
-                    #     dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
-                    # )
-                    print(dqn_success)
+                dqn_config = {
+                    "pipeline_id": args.dqn_pipeline_id,
+                    "experiment_id": args.dqn_experiment_id,
+                    "access_token": access_token
+                }
+                dqn_success = trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, fixed_dqn_params)
+                # dqn_success = trigger_and_wait_for_dqn_pipeline(
+                #     dqn_config, args.pipeline_domain, fixed_dqn_params, args.model_id
+                # )
+                print(dqn_success)
+                updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
 
-                    if dqn_success:
-                        print("1")
-                        updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
-                        print("2")
-                        if updated_instance.get('rlaf2pierce'):
-                            latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
-                            print(f"DEBUG: DQN recommendation: {latest_rlaf2pierce}")
+                if not latest_rlaf2pierce.get("pierce_or_not", True):
+                    print("pierce_or_not is false. Exiting loop.")
+                    break
+                print(f"{latest_rlaf2pierce}")
+                rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
+                action_id_for_next_pierce = latest_rlaf2pierce['action_id']
+                action_details = next((a for a in rlaf_actions if a["id"] == action_id_for_next_pierce), None)
+                if not action_details:
+                    raise ValueError(f"Action with ID {action_id_for_next_pierce} not found in rlaf_actions")
 
-                            if not latest_rlaf2pierce.get("pierce_or_not", True):
-                                print("DEBUG: pierce_or_not is false. Stopping RLAF loop.")
-                                break
-
-                            rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
-                            action_id = latest_rlaf2pierce['action_id']
-                            action_details = next((a for a in rlaf_actions if a["id"] == action_id), None)
-
-                            if not action_details:
-                                raise ValueError(f"Action ID {action_id} not found")
-
-                            action_to_use = action_details['params']
-                            print(f"DEBUG: Using DQN action: {action_to_use}")
-                        else:
-                            raise ValueError("No rlaf2pierce data from DQN")
-                    else:
-                        raise RuntimeError("DQN pipeline failed")
-
-                except Exception as e:
-                    print(f"ERROR: DQN pipeline error: {e}")
-                    raise
+                print(f"DQN pipeline recommended action: {action_details}. Retraining model.")
 
                 # Retrain with DQN action
                 print(f"DEBUG: Starting retraining with action: {action_to_use}")
