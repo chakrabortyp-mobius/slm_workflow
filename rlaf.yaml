@@ -493,7 +493,7 @@ implementation:
                 print(f"DQN pipeline recommended action: {action_details}. Retraining model.")
 
                 # Retrain with DQN action
-                print(f"DEBUG: Starting retraining with action: {action_to_use}")
+                # print(f"DEBUG: Starting retraining with action: {action_to_use}")
                 paths = {
                     "tokenizer_json": args.tokenizer_json,
                     "train_corpus": args.train_corpus,
@@ -503,7 +503,7 @@ implementation:
                 }
 
                 retraining_results = train_llm_with_action(
-                    action_to_use, paths, args.retrained_model, previous_state, fixed_dqn_params
+                    action_details['params'], paths, args.retrained_model, previous_state, fixed_dqn_params
                 )
 
                 current_metrics = retraining_results["metrics"]
