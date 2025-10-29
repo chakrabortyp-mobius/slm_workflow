@@ -1,0 +1,121 @@
+name: Add ChatML Special Tokens
+description: Adds ChatML special tokens to an existing tokenizer (tools, think, tool_call, tool_response tags).
+
+inputs:
+  - name: tokenizer_json
+    type: Model
+
+outputs:
+  - name: modified_tokenizer
+    type: Model
+  - name: modification_report
+    type: Data
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+        
+        cat >/tmp/add_chatml_tokens.py <<'PY'
+        import argparse, json, os
+        from transformers import PreTrainedTokenizerFast
+        from enum import Enum
+
+        class ChatmlSpecialTokens(str, Enum):
+            tools = "<tools>"
+            eotools = "</tools>"
+            think = "<think>"
+            eothink = "</think>"
+            tool_call = "<tool_call>"
+            eotool_call = "</tool_call>"
+            tool_response = "<tool_response>"
+            eotool_response = "</tool_response>"
+            pad_token = "[PAD]"
+            eos_token = "[EOS]"
+            bos_token = "[BOS]"
+
+            @classmethod
+            def list(cls):
+                return [c.value for c in cls]
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--tokenizer-json", required=True)
+            ap.add_argument("--modified-tokenizer", required=True)
+            ap.add_argument("--modification-report", required=True)
+            a = ap.parse_args()
+
+            print(f"[INFO] Loading tokenizer from {a.tokenizer_json}")
+            
+            # Load the tokenizer using PreTrainedTokenizerFast
+            tok = PreTrainedTokenizerFast(tokenizer_file=a.tokenizer_json)
+            before_vocab_size = len(tok)
+            
+            print(f"[INFO] Original vocab size: {before_vocab_size}")
+
+            # Get all special tokens
+            special_tokens = ChatmlSpecialTokens.list()
+            
+            # Filter out tokens that should not be in additional_special_tokens
+            additional_tokens = [t for t in special_tokens if t not in ("[PAD]", "[EOS]", "[BOS]")]
+            
+
+            # Add special tokens to the tokenizer
+            tok.add_special_tokens({
+                "bos_token": "[BOS]",
+                "pad_token": "[PAD]",
+                "eos_token": "[EOS]",
+                "additional_special_tokens": additional_tokens
+            })
+
+            after_vocab_size = len(tok)
+            tokens_added_count = after_vocab_size - before_vocab_size
+            
+            print(f"[INFO] EOS token: {tok.eos_token}")
+            print(f"[INFO] PAD token: {tok.pad_token}")
+            print(f"[INFO] BOS token: {tok.bos_token}")
+            
+            # Save modified tokenizer using save_pretrained
+            os.makedirs(a.modified_tokenizer, exist_ok=True)
+            tok.save_pretrained(a.modified_tokenizer)
+
+            # Create modification report
+            report = {
+                "input_tokenizer": a.tokenizer_json,
+                "output_tokenizer": a.modified_tokenizer,
+                "vocab_size_before": before_vocab_size,
+                "vocab_size_after": after_vocab_size,
+                "tokens_added_count": tokens_added_count,
+                "special_tokens_config": {
+                    "bos_token": "[BOS]",
+                    "pad_token": "[PAD]",
+                    "eos_token": "[EOS]",
+                    "additional_special_tokens": additional_tokens
+                },
+                "chatml_tokens": special_tokens
+            }
+            
+            os.makedirs(os.path.dirname(a.modification_report) or ".", exist_ok=True)
+            with open(a.modification_report, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+
+            print(f"[SUCCESS] Modified tokenizer saved to {a.modified_tokenizer}")
+            print(f"[SUCCESS] Modification report saved to {a.modification_report}")
+            print(f"[INFO] Final vocab size: {after_vocab_size} (+{tokens_added_count})")
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        python3 -u /tmp/add_chatml_tokens.py "$0" "$@"
+    args:
+      - --tokenizer-json
+      - {inputPath: tokenizer_json}
+      - --modified-tokenizer
+      - {outputPath: modified_tokenizer}
+      - --modification-report
+      - {outputPath: modification_report}
