@@ -1,4 +1,4 @@
-name: Add ChatML Special Tokens
+name: sam_tokenizer
 description: Adds ChatML special tokens to an existing tokenizer (tools, think, tool_call, tool_response tags).
 
 inputs:
