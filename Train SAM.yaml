@@ -184,10 +184,10 @@ implementation:
                 "{{ raise_exception('System role not supported') }}"
                 "{% endif %}"
                 "{% for message in messages %}"
-                "{{ '<start_of_turn>' ~ message['role'] ~ '\n' ~ (message['content'] | trim) "
-                "~ '<end_of_turn>' ~ eos_token ~ '\n' }}"
+                "{{ '<start_of_turn>' ~ message['role'] ~ '\\n' ~ (message['content'] | trim) "
+                "~ '<end_of_turn>' ~ eos_token ~ '\\n' }}"
                 "{% endfor %}"
-                "{% if add_generation_prompt %}{{ '<start_of_turn>assistant\n' }}{% endif %}"
+                "{% if add_generation_prompt %}{{ '<start_of_turn>assistant\\n' }}{% endif %}"
             )
 
             # Preprocess function
