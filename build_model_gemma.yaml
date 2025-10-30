@@ -183,6 +183,18 @@ implementation:
                     self.cos_global = self.cos_global.to(device); self.sin_global = self.sin_global.to(device)
                 if self.cos_local.device != device:
                     self.cos_local = self.cos_local.to(device); self.sin_local = self.sin_local.to(device)
+
+            def build_rope_cache(self, seq_len, head_dim, device=None, dtype=torch.float32):
+                cos, sin = compute_rope_params(
+                    head_dim=head_dim,
+                    theta_base=self.cfg["rope_local_base"],
+                    context_length=seq_len,
+                    dtype=dtype,
+                )
+                if device is not None:
+                    cos = cos.to(device)
+                    sin = sin.to(device)
+                return cos, sin
             def forward(self, input_ids: torch.LongTensor, labels: torch.LongTensor = None):
                 x = self.token_emb(input_ids).to(self.cfg["dtype"])
                 B, T, _ = x.size(); device = x.device
@@ -381,6 +393,18 @@ implementation:
                         self.cos_global = self.cos_global.to(device); self.sin_global = self.sin_global.to(device)
                     if self.cos_local.device != device:
                         self.cos_local = self.cos_local.to(device); self.sin_local = self.sin_local.to(device)
+
+                def build_rope_cache(self, seq_len, head_dim, device=None, dtype=torch.float32):
+                    cos, sin = compute_rope_params(
+                        head_dim=head_dim,
+                        theta_base=self.cfg["rope_local_base"],
+                        context_length=seq_len,
+                        dtype=dtype,
+                    )
+                    if device is not None:
+                        cos = cos.to(device)
+                        sin = sin.to(device)
+                    return cos, sin
                 def forward(self, input_ids: torch.LongTensor, labels: torch.LongTensor = None):
                     x = self.token_emb(input_ids).to(model_dtype)
                     B, T, _ = x.size(); device = x.device
