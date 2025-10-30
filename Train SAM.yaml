@@ -52,7 +52,7 @@ implementation:
       - -ec
       - |-
         set -o pipefail
-        
+        pip install -q peft trl
         cat >/tmp/train_lora.py <<'PY'
         import argparse, json, os, shutil, importlib.util
         import torch
