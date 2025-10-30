@@ -196,7 +196,7 @@ implementation:
                 first_message = messages[0]
                 if first_message["role"] == "system":
                     system_message_content = first_message["content"]
-                    messages[1]["content"] = system_message_content + "Also, before making a call to a function take the time to plan the function to take. Make that thinking process between <think>{your thoughts}</think>\n\n" + messages[1]["content"]
+                    messages[1]["content"] = system_message_content + "Also, before making a call to a function take the time to plan the function to take. Make that thinking process between <think>{your thoughts}</think>\\n\\n" + messages[1]["content"]
                     messages.pop(0)
                 return {"text": tok.apply_chat_template(messages, tokenize=False)}
 
