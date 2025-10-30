@@ -9,7 +9,7 @@ inputs:
   - name: gemma3_model_py
     type: Data
   - name: best_pt
-    type: Data
+    type: Model
   - name: dataset_name
     type: String
     default: "Jofthomas/hermes-function-calling-thinking-V1"
