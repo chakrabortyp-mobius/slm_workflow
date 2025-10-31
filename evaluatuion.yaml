@@ -52,15 +52,7 @@ implementation:
       - -c
       - |-
         import subprocess, sys
-        pkgs = ["mlflow", "rouge-score", "pandas", "sacrebleu"]
-        for p in pkgs:
-            try:
-                __import__(p.replace("-", "_"))
-                print(f"[INFO] Python package already present: {p}")
-            except Exception:
-                print(f"[INFO] Installing Python package: {p}")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", p])
-        
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "mlflow", "rouge-score", "pandas", "sacrebleu"])
         import argparse, json, os, importlib.util, random
         import shutil
         import torch
