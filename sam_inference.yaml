@@ -65,12 +65,15 @@ implementation:
         from types import MethodType
 
         # LangChain tools
-        from langchain.tools import (
-            WikipediaQueryRun,
-            DuckDuckGoSearchRun,
-            Tool,
-        )
-        from langchain.utilities import WikipediaAPIWrapper
+        # from langchain.tools import (
+        #     WikipediaQueryRun,
+        #     DuckDuckGoSearchRun,
+        #     Tool,
+        # )
+        from langchain_community.tools import WikipediaQueryRun, DuckDuckGoSearchRun
+        from langchain_community.tools.base import Tool
+        from langchain_community.utilities import WikipediaAPIWrapper
+        #from langchain.utilities import WikipediaAPIWrapper
         from datetime import datetime
 
         # ---------------- Dynamic Gemma3 loader ----------------
