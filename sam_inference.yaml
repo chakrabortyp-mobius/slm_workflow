@@ -10,7 +10,7 @@ inputs:
     type: Data
   - name: best_pt
     type: Model
-  - name: lora_model_dir
+  - name: lora_model_diru
     type: Model
   - name: user_query
     type: String
@@ -587,7 +587,7 @@ implementation:
                 })
                 
                 # Add tool response to messages
-                tool_content = f"<tool_response>\n{tool_result}\n</tool_response>"
+                tool_content = "<tool_response>\n" + "{tool_result}" + "\n</tool_response>"
                 messages.append({"role": "tool", "content": tool_content})
                 
                 iteration += 1
