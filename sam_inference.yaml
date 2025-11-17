@@ -70,6 +70,7 @@ implementation:
         #     DuckDuckGoSearchRun,
         #     Tool,
         # )
+        from langchain_core.tools import Tool
         from langchain_community.tools import WikipediaQueryRun, DuckDuckGoSearchRun
         from langchain_community.tools.base import Tool
         from langchain_community.utilities import WikipediaAPIWrapper
