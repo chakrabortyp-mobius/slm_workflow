@@ -248,7 +248,7 @@ implementation:
                 "n_kv_groups": 1,
                 "rope_local_base": 10000.0,
                 "rope_base": 1000000.0,
-                "sliding_window": 512,
+                "sliding_window": 2048,
                 "layer_types": layer_types,
                 "dtype": model_dtype,
                 "query_pre_attn_scalar": 128,
