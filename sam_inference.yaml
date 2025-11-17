@@ -75,7 +75,7 @@ implementation:
 
         # ---------------- Dynamic Gemma3 loader ----------------
         def _load_model_class_from_file(py_path: str, class_name: str = "Gemma3Model"):
-            
+            """Load the Gemma3Model class from the provided Python file."""
             if not py_path.endswith(".py"):
                 tmp = py_path + ".py"
                 shutil.copyfile(py_path, tmp)
@@ -90,6 +90,7 @@ implementation:
             return getattr(mod, class_name)
 
         def _patch_resize_token_embeddings(Gemma3Model):
+            """Patch the model to support token embedding resizing."""
             def resize_token_embeddings(self, new_size):
                 old_emb = self.token_emb
                 old_out = self.out_head
@@ -149,7 +150,7 @@ implementation:
                 return {"input_ids": input_ids, **kwargs}
 
         def extend_sliding_rope(self, new_len: int):
-            
+            """Extend the sliding window for RoPE positional embeddings."""
             device = next(self.parameters()).device
             cos, sin = self.build_rope_cache(
                 seq_len=new_len,
@@ -163,7 +164,7 @@ implementation:
 
         # ---------------- Tool definitions ----------------
         def get_stock_price(company: str) -> str:
-            
+            """Get the current stock price of a company using yfinance."""
             try:
                 import yfinance as yf
                 ticker = yf.Ticker(company)
@@ -176,17 +177,17 @@ implementation:
                 return json.dumps({"error": str(e)})
 
         def get_movie_details(title: str) -> str:
-            
+            """Get details about a movie using Wikipedia."""
             try:
                 wiki = WikipediaAPIWrapper()
                 result = wiki.run(f"{title} film")
                 # Truncate to reasonable length
-                return result #[:500] if len(result) > 500 else result
+                return result[:500] if len(result) > 500 else result
             except Exception as e:
                 return f"Error fetching movie details: {str(e)}"
 
         def calculate(expression: str) -> str:
-            
+            """Evaluate a mathematical expression safely."""
             try:
                 # Only allow basic math operations
                 allowed_chars = set("0123456789+-*/()%. ")
@@ -198,11 +199,11 @@ implementation:
                 return f"Error: {str(e)}"
 
         def get_current_time(timezone: str = "UTC") -> str:
-            
+            """Get the current date and time."""
             return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         def search_web(query: str) -> str:
-            
+            """Search the web using DuckDuckGo."""
             try:
                 search = DuckDuckGoSearchRun()
                 return search.run(query)
@@ -210,7 +211,7 @@ implementation:
                 return f"Error searching: {str(e)}"
 
         def search_wikipedia(query: str) -> str:
-            
+            """Search Wikipedia for information."""
             try:
                 wiki = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
                 return wiki.run(query)
@@ -334,7 +335,7 @@ implementation:
         }
 
         def get_tools_for_config(config: str) -> List[Dict]:
-            
+            """Get tool schemas based on configuration."""
             if config == "default":
                 return [TOOL_SCHEMAS["get_stock_price"], TOOL_SCHEMAS["get_movie_details"]]
             elif config == "all":
@@ -353,7 +354,7 @@ implementation:
 
         # ---------------- Tool call parsing ----------------
         def parse_tool_call(content: str) -> Optional[Dict[str, Any]]:
-            
+            """Parse tool call from model output."""
             # Look for <tool_call>...</tool_call> tags
             pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
             matches = re.findall(pattern, content, re.DOTALL)
@@ -378,7 +379,7 @@ implementation:
                     return None
 
         def extract_thinking(content: str) -> tuple[str, str]:
-            
+            """Extract thinking content and remaining content."""
             pattern = r'<think>(.*?)</think>'
             matches = re.findall(pattern, content, re.DOTALL)
             
@@ -391,7 +392,7 @@ implementation:
             return "", content
 
         def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> str:
-            
+            """Execute a tool call and return the result."""
             if tool_name not in TOOL_FUNCTIONS:
                 return f"Error: Tool '{tool_name}' not found"
             
@@ -487,8 +488,6 @@ implementation:
             print(f"[INFO] Loaded {len(tools_json)} tools")
 
             # Build system prompt
-            tool_open = "<tool_call>"
-            tool_close = "</tool_call>"
             system_prompt = (
                 "You are a function calling AI model. You are provided with function signatures "
                 "within <tools></tools> XML tags. You may call one or more functions to assist with "
@@ -501,7 +500,7 @@ implementation:
                 "'Arguments', 'type': 'object'}, 'name': {'title': 'Name', 'type': 'string'}}, "
                 "'required': ['arguments', 'name']} "
                 "For each function call return a json object with function name and arguments within "
-                f"{tool_open}{tool_close} XML tags as follows:\n {tool_open}\n {tool_call}\n{tool_close}"
+                "<tool_call></tool_call> XML tags as follows:\n<tool_call>\n{tool_call}\n</tool_call>"
             )
 
             # Initialize conversation
@@ -511,7 +510,7 @@ implementation:
             ]
 
             def generate_next(messages_list):
-                
+                """Generate next model response."""
                 prompt = tok.apply_chat_template(
                     messages_list,
                     tokenize=False,
