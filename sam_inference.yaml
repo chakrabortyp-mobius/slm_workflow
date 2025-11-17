@@ -10,7 +10,7 @@ inputs:
     type: Data
   - name: best_pt
     type: Model
-  - name: lora_model_diru
+  - name: lora_model_dir
     type: Model
   - name: user_query
     type: String
