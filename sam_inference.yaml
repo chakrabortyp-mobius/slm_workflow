@@ -1,0 +1,657 @@
+name: Infer SAM with Tools
+description: Runs inference with a Gemma3 + LoRA model, supporting tool-calling with configurable tools and multi-turn conversations.
+
+inputs:
+  - name: tokenizer_dir
+    type: Model
+  - name: gemma3_config_json
+    type: Data
+  - name: gemma3_model_py
+    type: Data
+  - name: best_pt
+    type: Model
+  - name: lora_model_dir
+    type: Model
+  - name: user_query
+    type: String
+    default: "Hi, can you tell me the current stock price of Apple?"
+  - name: max_new_tokens
+    type: Integer
+    default: "512"
+  - name: temperature
+    type: Float
+    default: "0.7"
+  - name: max_tool_iterations
+    type: Integer
+    default: "5"
+  - name: tools_config
+    type: String
+    default: "default"
+
+outputs:
+  - name: conversation_trace
+    type: Data
+  - name: final_response
+    type: Data
+  - name: inference_stats
+    type: Data
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+        pip install -q peft langchain langchain-community duckduckgo-search wikipedia yfinance
+
+        cat >/tmp/infer_sam.py <<'PY'
+        import argparse
+        import json
+        import os
+        import shutil
+        import importlib.util
+        import ast
+        import re
+        from typing import Optional, Dict, Any, List
+        import time
+
+        import torch
+        import torch.nn as nn
+        from transformers import PreTrainedTokenizerFast, PretrainedConfig, PreTrainedModel
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+        from peft import PeftModel
+        from types import MethodType
+
+        # LangChain tools
+        from langchain.tools import (
+            WikipediaQueryRun,
+            DuckDuckGoSearchRun,
+            Tool,
+        )
+        from langchain.utilities import WikipediaAPIWrapper
+        from datetime import datetime
+
+        # ---------------- Dynamic Gemma3 loader ----------------
+        def _load_model_class_from_file(py_path: str, class_name: str = "Gemma3Model"):
+            
+            if not py_path.endswith(".py"):
+                tmp = py_path + ".py"
+                shutil.copyfile(py_path, tmp)
+                py_path = tmp
+            spec = importlib.util.spec_from_file_location("gemma3_model", py_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec from {py_path}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if not hasattr(mod, class_name):
+                raise AttributeError(f"{py_path} does not define {class_name}")
+            return getattr(mod, class_name)
+
+        def _patch_resize_token_embeddings(Gemma3Model):
+            def resize_token_embeddings(self, new_size):
+                old_emb = self.token_emb
+                old_out = self.out_head
+                d = old_emb.embedding_dim
+                device, dtype = old_emb.weight.device, old_emb.weight.dtype
+
+                new_emb = nn.Embedding(new_size, d, device=device, dtype=dtype)
+                num_copy = min(old_emb.num_embeddings, new_size)
+                new_emb.weight.data[:num_copy] = old_emb.weight.data[:num_copy]
+                self.token_emb = new_emb
+
+                new_out = nn.Linear(d, new_size, bias=False, device=device, dtype=dtype)
+                new_out.weight.data[:num_copy] = old_out.weight.data[:num_copy]
+                self.out_head = new_out
+                self.cfg["vocab_size"] = int(new_size)
+                return self.token_emb
+            Gemma3Model.resize_token_embeddings = resize_token_embeddings
+
+        # ---------------- Config + wrapper ----------------
+        class Gemma3Config(PretrainedConfig):
+            model_type = "gemma3"
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+
+        class Gemma3ForCausalLM(PreTrainedModel):
+            config_class = Gemma3Config
+            base_model_prefix = "gemma3"
+
+            def __init__(self, config: Gemma3Config):
+                super().__init__(config)
+                self.model = None
+
+            @classmethod
+            def from_pretrained(cls, cfg_path, model_py_path, weights_path, device):
+                cfg_dict = json.load(open(cfg_path))
+                cfg_dict["dtype"] = torch.float16 if str(cfg_dict.get("dtype")) == "float16" else torch.float32
+                config = Gemma3Config(**cfg_dict)
+
+                ModelClass = _load_model_class_from_file(model_py_path, "Gemma3Model")
+                _patch_resize_token_embeddings(ModelClass)
+                model = ModelClass(cfg_dict).to(device)
+                state = torch.load(weights_path, map_location=device)
+                model.load_state_dict(state, strict=True)
+
+                wrapper = cls(config)
+                wrapper.model = model
+                return wrapper
+
+            def forward(self, input_ids=None, labels=None, **kwargs):
+                logits, loss = self.model(input_ids=input_ids, labels=labels)
+                return CausalLMOutputWithPast(loss=loss, logits=logits)
+
+            def resize_token_embeddings(self, new_size):
+                return self.model.resize_token_embeddings(new_size)
+
+            def prepare_inputs_for_generation(self, input_ids, **kwargs):
+                return {"input_ids": input_ids, **kwargs}
+
+        def extend_sliding_rope(self, new_len: int):
+            
+            device = next(self.parameters()).device
+            cos, sin = self.build_rope_cache(
+                seq_len=new_len,
+                head_dim=self.cfg["head_dim"],
+                device=device,
+                dtype=torch.float32,
+            )
+            self.cos_local, self.sin_local = cos, sin
+            self.cfg["sliding_window"] = int(new_len)
+            print(f"[INFO] sliding_window extended to {new_len}")
+
+        # ---------------- Tool definitions ----------------
+        def get_stock_price(company: str) -> str:
+            
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(company)
+                hist = ticker.history(period="1d")
+                if hist.empty:
+                    return f"Could not find stock price for {company}"
+                price = hist['Close'].iloc[-1]
+                return json.dumps({"stock_price": f"${price:.2f}"})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        def get_movie_details(title: str) -> str:
+            
+            try:
+                wiki = WikipediaAPIWrapper()
+                result = wiki.run(f"{title} film")
+                # Truncate to reasonable length
+                return result #[:500] if len(result) > 500 else result
+            except Exception as e:
+                return f"Error fetching movie details: {str(e)}"
+
+        def calculate(expression: str) -> str:
+            
+            try:
+                # Only allow basic math operations
+                allowed_chars = set("0123456789+-*/()%. ")
+                if not all(c in allowed_chars for c in expression):
+                    return "Error: Invalid characters in expression"
+                result = eval(expression, {"__builtins__": {}}, {})
+                return str(result)
+            except Exception as e:
+                return f"Error: {str(e)}"
+
+        def get_current_time(timezone: str = "UTC") -> str:
+            
+            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def search_web(query: str) -> str:
+            
+            try:
+                search = DuckDuckGoSearchRun()
+                return search.run(query)
+            except Exception as e:
+                return f"Error searching: {str(e)}"
+
+        def search_wikipedia(query: str) -> str:
+            
+            try:
+                wiki = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
+                return wiki.run(query)
+            except Exception as e:
+                return f"Error searching Wikipedia: {str(e)}"
+
+        # Tool registry
+        TOOL_FUNCTIONS = {
+            "get_stock_price": get_stock_price,
+            "get_movie_details": get_movie_details,
+            "calculator": calculate,
+            "get_current_time": get_current_time,
+            "search_web": search_web,
+            "search_wikipedia": search_wikipedia,
+        }
+
+        # Tool schemas
+        TOOL_SCHEMAS = {
+            "get_stock_price": {
+                "type": "function",
+                "function": {
+                    "name": "get_stock_price",
+                    "description": "Get the current stock price of a company",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "company": {
+                                "type": "string",
+                                "description": "The name or ticker symbol of the company"
+                            }
+                        },
+                        "required": ["company"]
+                    }
+                }
+            },
+            "get_movie_details": {
+                "type": "function",
+                "function": {
+                    "name": "get_movie_details",
+                    "description": "Get details about a movie",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "The title of the movie"
+                            }
+                        },
+                        "required": ["title"]
+                    }
+                }
+            },
+            "calculator": {
+                "type": "function",
+                "function": {
+                    "name": "calculator",
+                    "description": "Perform mathematical calculations",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "expression": {
+                                "type": "string",
+                                "description": "Mathematical expression to evaluate"
+                            }
+                        },
+                        "required": ["expression"]
+                    }
+                }
+            },
+            "get_current_time": {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get the current date and time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "timezone": {
+                                "type": "string",
+                                "description": "Timezone (default UTC)"
+                            }
+                        },
+                        "required": []
+                    }
+                }
+            },
+            "search_web": {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Search the web for current information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            "search_wikipedia": {
+                "type": "function",
+                "function": {
+                    "name": "search_wikipedia",
+                    "description": "Search Wikipedia for information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Wikipedia search query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        }
+
+        def get_tools_for_config(config: str) -> List[Dict]:
+            
+            if config == "default":
+                return [TOOL_SCHEMAS["get_stock_price"], TOOL_SCHEMAS["get_movie_details"]]
+            elif config == "all":
+                return list(TOOL_SCHEMAS.values())
+            elif config == "stock_only":
+                return [TOOL_SCHEMAS["get_stock_price"]]
+            elif config == "search":
+                return [TOOL_SCHEMAS["search_web"], TOOL_SCHEMAS["search_wikipedia"]]
+            else:
+                # Try to parse as JSON list of tool names
+                try:
+                    tool_names = json.loads(config)
+                    return [TOOL_SCHEMAS[name] for name in tool_names if name in TOOL_SCHEMAS]
+                except:
+                    return [TOOL_SCHEMAS["get_stock_price"], TOOL_SCHEMAS["get_movie_details"]]
+
+        # ---------------- Tool call parsing ----------------
+        def parse_tool_call(content: str) -> Optional[Dict[str, Any]]:
+            
+            # Look for <tool_call>...</tool_call> tags
+            pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
+            matches = re.findall(pattern, content, re.DOTALL)
+            
+            if not matches:
+                return None
+            
+            # Take the first match
+            tool_call_str = matches[0].strip()
+            
+            try:
+                # Try to parse as Python dict/JSON
+                tool_call = ast.literal_eval(tool_call_str)
+                return tool_call
+            except:
+                try:
+                    tool_call = json.loads(tool_call_str)
+                    return tool_call
+                except Exception as e:
+                    print(f"[WARN] Failed to parse tool_call: {e}")
+                    print(f"[WARN] Content was: {tool_call_str}")
+                    return None
+
+        def extract_thinking(content: str) -> tuple[str, str]:
+            
+            pattern = r'<think>(.*?)</think>'
+            matches = re.findall(pattern, content, re.DOTALL)
+            
+            if matches:
+                thinking = matches[0].strip()
+                # Remove thinking tags from content
+                clean_content = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+                return thinking, clean_content
+            
+            return "", content
+
+        def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> str:
+            
+            if tool_name not in TOOL_FUNCTIONS:
+                return f"Error: Tool '{tool_name}' not found"
+            
+            try:
+                func = TOOL_FUNCTIONS[tool_name]
+                # Extract the actual argument value based on parameter name
+                # For most tools, the key is either the function parameter name or a generic 'query'
+                if tool_name == "get_stock_price":
+                    arg_value = arguments.get("company", "")
+                elif tool_name == "get_movie_details":
+                    arg_value = arguments.get("title", "")
+                elif tool_name == "calculator":
+                    arg_value = arguments.get("expression", "")
+                elif tool_name == "get_current_time":
+                    arg_value = arguments.get("timezone", "UTC")
+                else:
+                    # Generic handling for search tools
+                    arg_value = arguments.get("query", list(arguments.values())[0] if arguments else "")
+                
+                result = func(arg_value)
+                return result
+            except Exception as e:
+                return f"Error executing {tool_name}: {str(e)}"
+
+        # ---------------- Main inference loop ----------------
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--tokenizer-dir", required=True)
+            ap.add_argument("--gemma3-config-json", required=True)
+            ap.add_argument("--gemma3-model-py", required=True)
+            ap.add_argument("--best-pt", required=True)
+            ap.add_argument("--lora-model-dir", required=True)
+            ap.add_argument("--user-query", required=True)
+            ap.add_argument("--max-new-tokens", type=int, required=True)
+            ap.add_argument("--temperature", type=float, required=True)
+            ap.add_argument("--max-tool-iterations", type=int, required=True)
+            ap.add_argument("--tools-config", required=True)
+            ap.add_argument("--conversation-trace", required=True)
+            ap.add_argument("--final-response", required=True)
+            ap.add_argument("--inference-stats", required=True)
+            a = ap.parse_args()
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[INFO] Using device: {device}")
+            
+            start_time = time.time()
+            stats = {
+                "device": device,
+                "tool_calls_made": 0,
+                "tool_call_details": [],
+                "total_tokens_generated": 0,
+                "inference_time_seconds": 0
+            }
+
+            # Load tokenizer
+            print(f"[INFO] Loading tokenizer from {a.tokenizer_dir}")
+            tok = PreTrainedTokenizerFast.from_pretrained(a.tokenizer_dir)
+
+            # Set chat template matching training
+            tok.chat_template = (
+                "{{ bos_token }}"
+                "{% if messages[0]['role'] == 'system' %}"
+                "{{ raise_exception('System role not supported') }}"
+                "{% endif %}"
+                "{% for message in messages %}"
+                "{{ '<start_of_turn>' ~ message['role'] ~ '\\n' ~ (message['content'] | trim) "
+                "~ '<end_of_turn>' ~ eos_token ~ '\\n' }}"
+                "{% endfor %}"
+                "{% if add_generation_prompt %}{{ '<start_of_turn>assistant\\n' }}{% endif %}"
+            )
+
+            # Load base model
+            print("[INFO] Loading base model")
+            base = Gemma3ForCausalLM.from_pretrained(
+                a.gemma3_config_json,
+                a.gemma3_model_py,
+                a.best_pt,
+                device,
+            )
+            
+            # Extend sliding window if needed
+            base_model = base.model
+            base_model.extend_sliding_rope = MethodType(extend_sliding_rope, base_model)
+
+            # Load LoRA and merge
+            print(f"[INFO] Loading LoRA adapters from {a.lora_model_dir}")
+            peft_model = PeftModel.from_pretrained(base, a.lora_model_dir)
+            model = peft_model.merge_and_unload()
+            model.eval()
+
+            # Get tools configuration
+            tools_json = get_tools_for_config(a.tools_config)
+            print(f"[INFO] Loaded {len(tools_json)} tools")
+
+            # Build system prompt
+            system_prompt = (
+                "You are a function calling AI model. You are provided with function signatures "
+                "within <tools></tools> XML tags. You may call one or more functions to assist with "
+                "the user query. Don't make assumptions about what values to plug into functions. "
+                "Here are the available tools: <tools> "
+                + json.dumps(tools_json)
+                + " </tools> "
+                "Use the following pydantic model json schema for each tool call you will make: "
+                "{'title': 'FunctionCall', 'type': 'object', 'properties': {'arguments': {'title': "
+                "'Arguments', 'type': 'object'}, 'name': {'title': 'Name', 'type': 'string'}}, "
+                "'required': ['arguments', 'name']} "
+                "For each function call return a json object with function name and arguments within "
+                "<tool_call></tool_call> XML tags as follows:\n<tool_call>\n{tool_call}\n</tool_call>"
+            )
+
+            # Initialize conversation
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "human", "content": a.user_query},
+            ]
+
+            def generate_next(messages_list):
+                
+                prompt = tok.apply_chat_template(
+                    messages_list,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                inputs = tok(prompt, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    out_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=a.max_new_tokens,
+                        do_sample=True,
+                        temperature=a.temperature,
+                        eos_token_id=tok.eos_token_id,
+                        pad_token_id=tok.pad_token_id if tok.pad_token_id else tok.eos_token_id,
+                    )
+                
+                gen_ids = out_ids[0][inputs["input_ids"].shape[1]:]
+                stats["total_tokens_generated"] += len(gen_ids)
+                text = tok.decode(gen_ids, skip_special_tokens=False)
+                return text
+
+            # Tool calling loop
+            iteration = 0
+            final_model_content = ""
+
+            print("[INFO] Starting inference loop")
+            while iteration < a.max_tool_iterations:
+                print(f"[INFO] Iteration {iteration + 1}/{a.max_tool_iterations}")
+                
+                # Generate model response
+                model_content = generate_next(messages)
+                
+                # Extract thinking if present
+                thinking, clean_content = extract_thinking(model_content)
+                if thinking:
+                    print(f"[INFO] Model thinking: {thinking[:100]}...")
+                
+                # Add to messages
+                messages.append({"role": "model", "content": model_content})
+                final_model_content = model_content
+                
+                # Check for tool call
+                tool_call = parse_tool_call(model_content)
+                
+                if tool_call is None:
+                    print("[INFO] No tool call detected, finishing.")
+                    break
+                
+                # Execute tool
+                tool_name = tool_call.get("name", "")
+                arguments = tool_call.get("arguments", {})
+                
+                print(f"[INFO] Executing tool: {tool_name}")
+                print(f"[INFO] Arguments: {arguments}")
+                
+                tool_start = time.time()
+                tool_result = execute_tool(tool_name, arguments)
+                tool_duration = time.time() - tool_start
+                
+                print(f"[INFO] Tool result: {tool_result[:200]}...")
+                
+                # Record tool call
+                stats["tool_calls_made"] += 1
+                stats["tool_call_details"].append({
+                    "iteration": iteration + 1,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "result": tool_result,
+                    "duration_seconds": tool_duration
+                })
+                
+                # Add tool response to messages
+                tool_content = f"<tool_response>\n{tool_result}\n</tool_response>"
+                messages.append({"role": "tool", "content": tool_content})
+                
+                iteration += 1
+
+            # Calculate total time
+            stats["inference_time_seconds"] = time.time() - start_time
+
+            # Extract final clean response (without tags)
+            _, final_clean = extract_thinking(final_model_content)
+            final_clean = re.sub(r'<tool_call>.*?</tool_call>', '', final_clean, flags=re.DOTALL).strip()
+            final_clean = re.sub(r'</?[^>]+>', '', final_clean).strip()
+
+            # Save outputs
+            print("[INFO] Saving outputs")
+            
+            os.makedirs(os.path.dirname(a.conversation_trace) or ".", exist_ok=True)
+            with open(a.conversation_trace, "w", encoding="utf-8") as f:
+                json.dump(messages, f, indent=2)
+
+            os.makedirs(os.path.dirname(a.final_response) or ".", exist_ok=True)
+            with open(a.final_response, "w", encoding="utf-8") as f:
+                json.dump({
+                    "raw_response": final_model_content,
+                    "clean_response": final_clean,
+                    "tool_calls_used": stats["tool_calls_made"]
+                }, f, indent=2)
+
+            os.makedirs(os.path.dirname(a.inference_stats) or ".", exist_ok=True)
+            with open(a.inference_stats, "w", encoding="utf-8") as f:
+                json.dump(stats, f, indent=2)
+
+            print(f"[SUCCESS] Conversation trace saved to {a.conversation_trace}")
+            print(f"[SUCCESS] Final response saved to {a.final_response}")
+            print(f"[SUCCESS] Inference stats saved to {a.inference_stats}")
+            print(f"[INFO] Total tool calls: {stats['tool_calls_made']}")
+            print(f"[INFO] Total tokens generated: {stats['total_tokens_generated']}")
+            print(f"[INFO] Total time: {stats['inference_time_seconds']:.2f}s")
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        python3 -u /tmp/infer_sam.py "$0" "$@"
+    args:
+      - --tokenizer-dir
+      - {inputPath: tokenizer_dir}
+      - --gemma3-config-json
+      - {inputPath: gemma3_config_json}
+      - --gemma3-model-py
+      - {inputPath: gemma3_model_py}
+      - --best-pt
+      - {inputPath: best_pt}
+      - --lora-model-dir
+      - {inputPath: lora_model_dir}
+      - --user-query
+      - {inputValue: user_query}
+      - --max-new-tokens
+      - {inputValue: max_new_tokens}
+      - --temperature
+      - {inputValue: temperature}
+      - --max-tool-iterations
+      - {inputValue: max_tool_iterations}
+      - --tools-config
+      - {inputValue: tools_config}
+      - --conversation-trace
+      - {outputPath: conversation_trace}
+      - --final-response
+      - {outputPath: final_response}
+      - --inference-stats
+      - {outputPath: inference_stats}
