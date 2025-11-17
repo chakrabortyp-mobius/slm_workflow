@@ -487,6 +487,8 @@ implementation:
             print(f"[INFO] Loaded {len(tools_json)} tools")
 
             # Build system prompt
+            tool_open = "<tool_call>"
+            tool_close = "</tool_call>"
             system_prompt = (
                 "You are a function calling AI model. You are provided with function signatures "
                 "within <tools></tools> XML tags. You may call one or more functions to assist with "
@@ -499,7 +501,7 @@ implementation:
                 "'Arguments', 'type': 'object'}, 'name': {'title': 'Name', 'type': 'string'}}, "
                 "'required': ['arguments', 'name']} "
                 "For each function call return a json object with function name and arguments within "
-                " <tool_call> </tool_call> XML tags as follows:\n <tool_call>\n {tool_call}\n </tool_call>"
+                f"{tool_open}{tool_close} XML tags as follows:\n {tool_open}\n {tool_call}\n{tool_close}"
             )
 
             # Initialize conversation
