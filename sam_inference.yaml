@@ -72,7 +72,7 @@ implementation:
         # )
         from langchain_core.tools import Tool
         from langchain_community.tools import WikipediaQueryRun, DuckDuckGoSearchRun
-        from langchain_community.tools.base import Tool
+        
         from langchain_community.utilities import WikipediaAPIWrapper
         #from langchain.utilities import WikipediaAPIWrapper
         from datetime import datetime
