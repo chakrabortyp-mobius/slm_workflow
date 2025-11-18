@@ -514,7 +514,7 @@ implementation:
             #     {"role": "system", "content": system_prompt},
             #     {"role": "human", "content": a.user_query},
             # ]
-            first_user_message = system_prompt + "\n\n" + a.user_query
+            first_user_message = system_prompt + "\\n\\n" + a.user_query
             messages = [
                 {"role": "human", "content": first_user_message},
             ]
