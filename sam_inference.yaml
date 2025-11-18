@@ -521,12 +521,22 @@ implementation:
                     tokenize=False,
                     add_generation_prompt=True,
                 )
+                # inputs = tok(prompt, return_tensors="pt")
+                # inputs = {k: v.to(device) for k, v in inputs.items()}
                 inputs = tok(prompt, return_tensors="pt")
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                input_ids = inputs["input_ids"].to(device)
                 
                 with torch.no_grad():
+                    # out_ids = model.generate(
+                    #     **inputs,
+                    #     max_new_tokens=a.max_new_tokens,
+                    #     do_sample=True,
+                    #     temperature=a.temperature,
+                    #     eos_token_id=tok.eos_token_id,
+                    #     pad_token_id=tok.pad_token_id if tok.pad_token_id else tok.eos_token_id,
+                    # )
                     out_ids = model.generate(
-                        **inputs,
+                        input_ids=input_ids,
                         max_new_tokens=a.max_new_tokens,
                         do_sample=True,
                         temperature=a.temperature,
