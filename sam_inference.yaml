@@ -60,16 +60,11 @@ implementation:
         import torch
         import torch.nn as nn
         from transformers import PreTrainedTokenizerFast, PretrainedConfig, PreTrainedModel
+        from transformers.generation import GenerationMixin
         from transformers.modeling_outputs import CausalLMOutputWithPast
         from peft import PeftModel
         from types import MethodType
 
-        # LangChain tools
-        # from langchain.tools import (
-        #     WikipediaQueryRun,
-        #     DuckDuckGoSearchRun,
-        #     Tool,
-        # )
         from langchain_core.tools import Tool
         from langchain_community.tools import WikipediaQueryRun, DuckDuckGoSearchRun
         
@@ -119,7 +114,7 @@ implementation:
             def __init__(self, **kwargs):
                 super().__init__(**kwargs)
 
-        class Gemma3ForCausalLM(PreTrainedModel):
+        class Gemma3ForCausalLM(GenerationMixin, PreTrainedModel):
             config_class = Gemma3Config
             base_model_prefix = "gemma3"
 
