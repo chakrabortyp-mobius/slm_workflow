@@ -471,7 +471,11 @@ implementation:
                 a.best_pt,
                 device,
             )
-            
+            current_vocab = base.model.token_emb.num_embeddings
+            tokenizer_vocab = len(tok)
+            if current_vocab != tokenizer_vocab:
+                print(f"[INFO] Resizing embeddings from {current_vocab} to {tokenizer_vocab}")
+                base.resize_token_embeddings(tokenizer_vocab)
             # Extend sliding window if needed
             base_model = base.model
             base_model.extend_sliding_rope = MethodType(extend_sliding_rope, base_model)
