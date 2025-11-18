@@ -510,9 +510,13 @@ implementation:
             )
 
             # Initialize conversation
+            # messages = [
+            #     {"role": "system", "content": system_prompt},
+            #     {"role": "human", "content": a.user_query},
+            # ]
+            first_user_message = system_prompt + "\n\n" + a.user_query
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "human", "content": a.user_query},
+                {"role": "human", "content": first_user_message},
             ]
 
             def generate_next(messages_list):
