@@ -1,4 +1,4 @@
-name: Generic LoRA Fine-tuning
+name: LoRA Fine-tuning
 description: Fine-tunes any LLM using PEFT LoRA adapters with custom chat template and special tokens
 
 inputs:
