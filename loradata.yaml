@@ -1,0 +1,114 @@
+name: Dataset Exporter
+description: Loads and exports HuggingFace datasets in messages format for LoRA training
+
+inputs:
+  - {name: dataset_name, type: String, description: 'Hugging Face dataset ID (e.g., Jofthomas/hermes-function-calling-thinking-V1)'}
+  - {name: split, type: String, description: 'Dataset split to use (train, test, validation)', default: 'train'}
+  - {name: max_samples, type: Integer, description: 'Maximum number of samples to export (0 for all)', default: 0}
+
+outputs:
+  - {name: processed_dataset, type: Data, description: 'Processed dataset in messages format'}
+
+metadata:
+  annotations:
+    author: Dataset Exporter Component
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def export_dataset(
+            dataset_name_val,
+            split_val,
+            max_samples_val,
+            processed_dataset_path,
+        ):
+            import logging
+            from datasets import load_dataset, DatasetDict
+            
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger("dataset_exporter")
+            
+            logger.info("=" * 60)
+            logger.info(f"Loading dataset: {dataset_name_val}")
+            logger.info(f"Split: {split_val}")
+            logger.info("=" * 60)
+            
+            # Load dataset
+            try:
+                dataset = load_dataset(dataset_name_val, split=split_val)
+            except Exception as e:
+                logger.error(f"Failed to load dataset: {e}")
+                raise
+            
+            logger.info(f"Dataset loaded successfully with {len(dataset)} samples")
+            logger.info(f"Dataset columns: {dataset.column_names}")
+            
+            # Validate messages format
+            if "messages" not in dataset.column_names and "conversations" not in dataset.column_names:
+                logger.error("Dataset must have 'messages' or 'conversations' column!")
+                logger.error(f"Available columns: {dataset.column_names}")
+                raise ValueError("Invalid dataset format - no messages/conversations column found")
+            
+            # Standardize to 'messages' column name if using 'conversations'
+            if "conversations" in dataset.column_names and "messages" not in dataset.column_names:
+                logger.info("Renaming 'conversations' column to 'messages'")
+                dataset = dataset.rename_column("conversations", "messages")
+            
+            # Limit samples if requested
+            if max_samples_val > 0 and max_samples_val < len(dataset):
+                logger.info(f"Limiting dataset to {max_samples_val} samples")
+                dataset = dataset.select(range(max_samples_val))
+            
+            # Log sample structure
+            if len(dataset) > 0:
+                logger.info("=" * 60)
+                logger.info("Sample message structure:")
+                sample_msgs = dataset[0].get("messages", [])
+                for i, msg in enumerate(sample_msgs[:3]):  # Show first 3 messages
+                    role = msg.get("role", msg.get("from", "unknown"))
+                    content = msg.get("content", msg.get("value", ""))
+                    logger.info(f"  Message {i}: role={role}, content_length={len(content)}")
+                if len(sample_msgs) > 3:
+                    logger.info(f"  ... and {len(sample_msgs) - 3} more messages")
+                logger.info("========================")
+            
+            # Save as DatasetDict for compatibility with training component
+            dataset_dict = DatasetDict({"train": dataset})
+            
+            logger.info(f"Saving processed dataset to {processed_dataset_path}")
+            dataset_dict.save_to_disk(processed_dataset_path)
+            
+            logger.info("=" * 60)
+            logger.info("Dataset export complete!")
+            logger.info(f"Total samples: {len(dataset)}")
+            logger.info(f"Output path: {processed_dataset_path}")
+            logger.info("=" * 60)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog="Dataset Exporter", description="Exports HuggingFace dataset for LoRA training")
+        _parser.add_argument("--dataset_name", dest="dataset_name_val", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--split", dest="split_val", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--max_samples", dest="max_samples_val", type=int, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--processed_dataset", dest="processed_dataset_path", type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        export_dataset(**_parsed_args)
+
+    args:
+      - --dataset_name
+      - {inputValue: dataset_name}
+      - --split
+      - {inputValue: split}
+      - --max_samples
+      - {inputValue: max_samples}
+      - --processed_dataset
+      - {outputPath: processed_dataset}
