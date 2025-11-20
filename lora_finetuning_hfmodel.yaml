@@ -167,7 +167,7 @@ implementation:
             if custom_chat_template_val and custom_chat_template_val.strip() and custom_chat_template_val.strip() != "None":
                 logger.info("Setting custom chat template")
                 # Unescape newlines and handle escaped characters
-                template = custom_chat_template_val   #.replace("\\n", "\n").replace("\\t", "\t")
+                template = custom_chat_template_val   
                 tokenizer.chat_template = template
                 logger.info(f"Custom chat template set")
             else:
