@@ -1,4 +1,4 @@
-name: Dataset Exporter
+name: loradata
 description: Loads and exports HuggingFace datasets in messages format for LoRA training
 
 inputs:
