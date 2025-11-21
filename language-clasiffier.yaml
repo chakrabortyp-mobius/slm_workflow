@@ -20,9 +20,6 @@ outputs:
   - {name: label_encoder, type: Data, description: 'Label encoder for inference'}
   - {name: training_metrics, type: Data, description: 'Training and validation metrics'}
 
-metadata:
-  annotations:
-    author: RoBERTa Classifier Component
 
 implementation:
   container:
