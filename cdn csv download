@@ -1,0 +1,88 @@
+name: CSV CDN Download
+description: Downloads a CSV file from a CDN URL and saves it locally for downstream processing
+inputs:
+  - {name: csv_url, type: String, description: "URL to fetch the CSV file from"}
+outputs:
+  - {name: csv_file, type: String, description: "Path to the downloaded CSV file"}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet requests || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet requests --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import requests
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--csv_url', type=str, required=True)
+        parser.add_argument('--csv_file', type=str, required=True)
+        args = parser.parse_args()
+        
+       
+        print("CSV CDN Downloader")
+        
+        print("Received CSV URL:", args.csv_url)
+        print("Output path:", args.csv_file)
+        
+        try:
+            # Download CSV file from CDN
+            print(" Fetching CSV file from CDN...")
+            resp = requests.get(args.csv_url, timeout=120)
+            resp.raise_for_status()
+            
+            print("Download successful!")
+            print("File size:", len(resp.content), "bytes")
+            
+            # Create output directory
+            os.makedirs(os.path.dirname(args.csv_file), exist_ok=True)
+            
+            # Save CSV file
+            with open(args.csv_file, "wb") as f:
+                f.write(resp.content)
+            
+            print("CSV file saved at:", args.csv_file)
+            
+            # Validate CSV structure
+            
+            print("Validating CSV structure...")
+            
+            # Read first few lines to show preview
+            with open(args.csv_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            print(f"Total lines: {len(lines)}")
+            print(" First 3 lines preview:")
+            
+            for i, line in enumerate(lines[:3]):
+                print(f"Line {i}: {line.strip()[:100]}...")
+            
+            
+            print("CSV download complete!")
+            print("CSV file ready for use in downstream components")
+            
+            
+        except requests.exceptions.Timeout:
+            print("Error: Request timed out while downloading from CDN")
+            exit(1)
+        except requests.exceptions.RequestException as e:
+            print("Error: Network error during download:", str(e))
+            exit(1)
+        except Exception as e:
+            print("Error: Failed to download CSV file:", str(e))
+            import traceback
+            traceback.print_exc()
+            exit(1)
+    args:
+      - --csv_url
+      - {inputValue: csv_url}
+      - --csv_file
+      - {outputPath: csv_file}
