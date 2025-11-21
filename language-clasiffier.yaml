@@ -1,6 +1,6 @@
 name: Train RoBERTa Classifier1
 inputs:
-  - {name: csv_path, type: String}
+  - {name: csv_path, type: Data}
   - {name: text_column, type: String}
   - {name: label_column, type: String}
   - {name: test_size, type: Float}
