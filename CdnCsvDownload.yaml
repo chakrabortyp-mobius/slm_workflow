@@ -1,9 +1,9 @@
-name: CDN Download 2
-description: Downloads config.properties and mpqe.mar files from CDN URLs and saves them locally with proper directory structure.
+name: CDN Download CSV Filehh
+description: Downloads a CSV file from a CDN URL and saves it locally with proper directory structure.
 inputs:
-  - {name: model_url, type: String, description: "URL to fetch the mpqe.mar model file from"}
+  - {name: csv_url, type: String, description: "URL to fetch the CSV file from"}
 outputs:
-  - {name: model_file, type: Data, description: "Downloaded mpqe.mar model file"}
+  - {name: csv_file, type: String, description: "Downloaded CSV file"}
 implementation:
   container:
     image: python:3.9
@@ -21,32 +21,38 @@ implementation:
         import argparse
         import os
         import requests
-
-        parser = argparse.ArgumentParser()
-
-        parser.add_argument('--model_url', type=str, required=True)
-        parser.add_argument('--model_file', type=str, required=True)
-        args = parser.parse_args()
-
         
-        print("Received model_url:", args.model_url)
-
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--csv_url', type=str, required=True)
+        parser.add_argument('--csv_file', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        print("Received csv_url:", args.csv_url)
+        
         try:
-
-            # Download mpqe.mar model file
-            print("Fetching mpqe.mar model from CDN:", args.model_url)
-            resp_model = requests.get(args.model_url, timeout=300)
-            resp_model.raise_for_status()
+            # Download CSV file
+            print("Fetching CSV file from CDN:", args.csv_url)
+            resp_csv = requests.get(args.csv_url, timeout=120)
+            resp_csv.raise_for_status()
             
-            os.makedirs(args.model_file, exist_ok=True)
-            model_path = os.path.join(args.model_file, 'data.csv')
-            with open(model_path, "wb") as f:
-                f.write(resp_model.content)
-            print("Model file saved at:", model_path)
-            print("Model size:", len(resp_model.content), "bytes")
-
-
-
+            os.makedirs(args.csv_file, exist_ok=True)
+            csv_path = os.path.join(args.csv_file, 'data.csv')
+            with open(csv_path, "w") as f:
+                f.write(resp_csv.text)
+            print("CSV file saved at:", csv_path)
+            print("CSV size:", len(resp_csv.text), "characters")
+            
+            print("File downloaded successfully!")
+            print("Output structure:")
+            print("  - csv_file/data.csv")
+            
+            # Verify file exists and has content
+            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                print("data.csv downloaded and verified")
+            else:
+                raise Exception("data.csv download verification failed")
+                
         except requests.exceptions.Timeout:
             print("Error: Request timed out while downloading from CDN")
             exit(1)
@@ -54,12 +60,13 @@ implementation:
             print("Error: Network error during download:", str(e))
             exit(1)
         except Exception as e:
-            print("Error: Failed to download files:", str(e))
+            print("Error: Failed to download file:", str(e))
             import traceback
             traceback.print_exc()
             exit(1)
+
     args:
-      - --model_url
-      - {inputValue: model_url}
-      - --model_file
-      - {outputPath: model_file}
+      - --csv_url
+      - {inputValue: csv_url}
+      - --csv_file
+      - {outputPath: csv_file}
