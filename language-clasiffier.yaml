@@ -1,4 +1,4 @@
-name: language-clasiffier
+name: language clasiffier
 description: Fine-tunes RoBERTa with frozen base and custom FC layers for text classification from CSV
 
 inputs:
