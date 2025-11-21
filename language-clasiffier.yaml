@@ -1,4 +1,4 @@
-name: Load and extract text from structured document API
+name: language classifier
 description: Fetches nested JSON from API and extracts all content and titles for model training
 inputs:
   - {name: api_url, type: String}
