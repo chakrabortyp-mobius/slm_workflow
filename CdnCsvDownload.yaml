@@ -21,66 +21,164 @@ implementation:
         import argparse
         import os
         import requests
+        import time
         
         parser = argparse.ArgumentParser()
         parser.add_argument('--csv_url', type=str, required=True)
         parser.add_argument('--csv_file', type=str, required=True)
         args = parser.parse_args()
         
-       
+        
         print("CSV CDN Downloader")
         
         print("Received CSV URL:", args.csv_url)
         print("Output path:", args.csv_file)
         
-        try:
-            # Download CSV file from CDN
-            print(" Fetching CSV file from CDN...")
-            resp = requests.get(args.csv_url, timeout=120)
-            resp.raise_for_status()
-            
-            print("Download successful!")
-            print("File size:", len(resp.content), "bytes")
-            
-            # Create output directory
+        # Ensure output directory exists and set proper file path
+        # Kubeflow often passes directory paths, so we need to handle that
+        if not args.csv_file.endswith('.csv'):
+            # If it's a directory path, create it and add filename
+            os.makedirs(args.csv_file, exist_ok=True)
+            csv_filepath = os.path.join(args.csv_file, 'data.csv')
+        else:
+            # If it's already a file path, just ensure parent dir exists
             os.makedirs(os.path.dirname(args.csv_file), exist_ok=True)
-            
-            # Save CSV file
-            with open(args.csv_file, "wb") as f:
-                f.write(resp.content)
-            
-            print("CSV file saved at:", args.csv_file)
-            
-            # Validate CSV structure
-            
-            print("Validating CSV structure...")
-            
-            # Read first few lines to show preview
-            with open(args.csv_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            
-            print(f"Total lines: {len(lines)}")
-            print(" First 3 lines preview:")
-            
-            for i, line in enumerate(lines[:3]):
-                print(f"Line {i}: {line.strip()[:100]}...")
-            
-            
-            print("CSV download complete!")
-            print("CSV file ready for use in downstream components")
-            
-            
-        except requests.exceptions.Timeout:
-            print("Error: Request timed out while downloading from CDN")
-            exit(1)
-        except requests.exceptions.RequestException as e:
-            print("Error: Network error during download:", str(e))
-            exit(1)
-        except Exception as e:
-            print("Error: Failed to download CSV file:", str(e))
-            import traceback
-            traceback.print_exc()
-            exit(1)
+            csv_filepath = args.csv_file
+        
+        print("Actual save path:", csv_filepath)
+        print("File will be saved as:", os.path.basename(csv_filepath))
+        
+        # Retry logic for CDN downloads
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"\nAttempt {attempt}/{max_retries}: Fetching CSV file from CDN...")
+                
+                # Add headers to mimic browser request
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/csv,application/csv,text/plain,*/*',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Connection': 'keep-alive'
+                }
+                
+                resp = requests.get(
+                    args.csv_url, 
+                    timeout=180,
+                    headers=headers,
+                    allow_redirects=True,
+                    verify=True
+                )
+                resp.raise_for_status()
+                
+                print("Download successful!")
+                print("Status code:", resp.status_code)
+                print("Content-Type:", resp.headers.get('Content-Type', 'unknown'))
+                print("File size:", len(resp.content), "bytes")
+                
+                # Save CSV file
+                with open(csv_filepath, "wb") as f:
+                    f.write(resp.content)
+                
+                print("CSV file saved at:", csv_filepath)
+                
+                # Validate CSV structure
+                
+                print("Validating CSV structure...")
+                
+                try:
+                    # Read first few lines to show preview
+                    with open(csv_filepath, "r", encoding="utf-8", errors='replace') as f:
+                        lines = f.readlines()
+                    
+                    if len(lines) == 0:
+                        raise ValueError("Downloaded CSV file is empty!")
+                    
+                    print(f"Total lines: {len(lines)}")
+                    print("\nFirst 3 lines preview:")
+                    print("-" * 60)
+                    for i, line in enumerate(lines[:3]):
+                        preview = line.strip()[:150]
+                        if len(line.strip()) > 150:
+                            preview += "..."
+                        print(f"Line {i}: {preview}")
+                    
+                    # Check for common CSV issues
+                    header = lines[0].strip()
+                    if ',' in header or '\t' in header:
+                        print("\n✓ CSV appears to have proper delimiters")
+                    else:
+                        print("\n⚠ Warning: No delimiters detected in header")
+                    
+                except Exception as e:
+                    print(f"Warning: Could not validate CSV content: {e}")
+                
+                
+                print("CSV download complete!")
+                print("CSV file ready for use in downstream components")
+                
+                
+                # Success - exit retry loop
+                break
+                
+            except requests.exceptions.HTTPError as e:
+                print(f"HTTP Error: {e}")
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response headers: {dict(e.response.headers)}")
+                
+                if e.response.status_code == 500:
+                    print("\n⚠ Server Error (500): The CDN server is experiencing issues")
+                elif e.response.status_code == 403:
+                    print("\n⚠ Access Forbidden (403): Authentication or permissions issue")
+                elif e.response.status_code == 404:
+                    print("\n⚠ Not Found (404): CSV file not found at the URL")
+                
+                if attempt < max_retries:
+                    print(f"\nRetrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    print("\n✗ All retry attempts failed")
+                    # Create empty file to prevent path errors
+                    with open(csv_filepath, 'w') as f:
+                        f.write("error,message\n")
+                        f.write(f"download_failed,{str(e)}\n")
+                    exit(1)
+                    
+            except requests.exceptions.Timeout:
+                print(f"Error: Request timed out (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    # Create empty file to prevent path errors
+                    with open(csv_filepath, 'w') as f:
+                        f.write("error,message\n")
+                        f.write("download_failed,timeout\n")
+                    exit(1)
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"Network error: {str(e)}")
+                if attempt < max_retries:
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    # Create empty file to prevent path errors
+                    with open(csv_filepath, 'w') as f:
+                        f.write("error,message\n")
+                        f.write(f"download_failed,{str(e)}\n")
+                    exit(1)
+                    
+            except Exception as e:
+                print(f"Unexpected error: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                # Create empty file to prevent path errors
+                with open(csv_filepath, 'w') as f:
+                    f.write("error,message\n")
+                    f.write(f"download_failed,{str(e)}\n")
+                exit(1)
     args:
       - --csv_url
       - {inputValue: csv_url}
