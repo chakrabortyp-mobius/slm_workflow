@@ -1,46 +1,279 @@
-name: language classifier
-description: Fine-tunes RoBERTa with frozen base and custom FC layers for text classification from CSV
-  - name: csv_path
-    type: String
-  - name: text_column
-    type: String
-  - name: label_column
-    type: String
-  - name: test_size
-    type: Float
-  - name: max_sequence_length
-    type: Integer
-  - name: hidden_layer_1
-    type: Integer
-  - name: hidden_layer_2
-    type: Integer
-  - name: dropout
-    type: Float
-  - name: batch_size
-    type: Integer
-  - name: learning_rate
-    type: Float
-  - name: num_epochs
-    type: Integer
-  - name: pretrained_model
-    type: String
+name: Train RoBERTa Classifier
+inputs:
+  - {name: csv_path, type: String}
+  - {name: text_column, type: String}
+  - {name: label_column, type: String}
+  - {name: test_size, type: Float}
+  - {name: max_sequence_length, type: Integer}
+  - {name: hidden_layer_1, type: Integer}
+  - {name: hidden_layer_2, type: Integer}
+  - {name: dropout, type: Float}
+  - {name: batch_size, type: Integer}
+  - {name: learning_rate, type: Float}
+  - {name: num_epochs, type: Integer}
+  - {name: pretrained_model, type: String}
 outputs:
-  - name: trained_model
-    type: Model
-  - name: label_encoder
-    type: Data
-  - name: training_metrics 
-    type: Data
+  - {name: trained_model, type: Model}
+  - {name: label_encoder, type: String}
+  - {name: training_metrics, type: String}
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: python:3.9
     command:
+      - sh
+      - -c
+      - |
+        pip install --quiet pandas scikit-learn torch transformers
+        exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
         
+        def train_roberta_classifier(
+            csv_path_val,
+            text_column_val,
+            label_column_val,
+            test_size_val,
+            max_sequence_length_val,
+            hidden_layer_1_val,
+            hidden_layer_2_val,
+            dropout_val,
+            batch_size_val,
+            learning_rate_val,
+            num_epochs_val,
+            pretrained_model_val,
+            trained_model_path,
+            label_encoder_path,
+            training_metrics_path,
+        ):
+            import logging
+            import json
+            import pickle
+            import pandas as pd
+            from sklearn.model_selection import train_test_split
+            from sklearn.preprocessing import LabelEncoder
+            import torch
+            import torch.nn as nn
+            from torch.utils.data import DataLoader, Dataset
+            from transformers import AutoTokenizer, AutoModel, AdamW
+            
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger("roberta_classifier")
+            
+            class TextDataset(Dataset):
+                def __init__(self, texts, labels, tokenizer, max_len):
+                    self.texts = texts
+                    self.labels = labels
+                    self.tokenizer = tokenizer
+                    self.max_len = max_len
+
+                def __len__(self):
+                    return len(self.texts)
+
+                def __getitem__(self, item):
+                    text = str(self.texts[item])
+                    label = self.labels[item]
+
+                    encoding = self.tokenizer.encode_plus(
+                        text,
+                        add_special_tokens=True,
+                        max_length=self.max_len,
+                        padding='max_length',
+                        truncation=True,
+                        return_attention_mask=True,
+                        return_tensors='pt',
+                    )
+                    
+                    return {
+                        'input_ids': encoding['input_ids'].flatten(),
+                        'attention_mask': encoding['attention_mask'].flatten(),
+                        'labels': torch.tensor(label, dtype=torch.long)
+                    }
+            
+            class RoBERTaClassifier(nn.Module):
+                def __init__(self, pretrained_model, num_classes, hidden_layers, dropout):
+                    super(RoBERTaClassifier, self).__init__()
+                    
+                    self.roberta = AutoModel.from_pretrained(pretrained_model)
+                    
+                    for param in self.roberta.parameters():
+                        param.requires_grad = False
+                    
+                    layers = []
+                    input_dim = 768
+                    
+                    for hidden_dim in hidden_layers:
+                        layers.append(nn.Linear(input_dim, hidden_dim))
+                        layers.append(nn.ReLU())
+                        layers.append(nn.Dropout(dropout))
+                        input_dim = hidden_dim
+                    
+                    layers.append(nn.Linear(input_dim, num_classes))
+                    self.classifier = nn.Sequential(*layers)
+
+                def forward(self, input_ids, attention_mask):
+                    outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
+                    cls_output = outputs[0][:, 0, :]
+                    logits = self.classifier(cls_output)
+                    return logits
+            
+            def train_epoch(model, data_loader, optimizer, criterion, device):
+                model.train()
+                total_loss = 0
+                total_correct = 0
+                total_samples = 0
+                
+                for batch in data_loader:
+                    input_ids = batch['input_ids'].to(device)
+                    attention_mask = batch['attention_mask'].to(device)
+                    labels = batch['labels'].to(device)
+                    
+                    optimizer.zero_grad()
+                    outputs = model(input_ids, attention_mask)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    optimizer.step()
+                    
+                    total_loss += loss.item()
+                    _, preds = torch.max(outputs, dim=1)
+                    total_correct += torch.sum(preds == labels).item()
+                    total_samples += labels.size(0)
+                
+                return total_loss / len(data_loader), total_correct / total_samples
+            
+            def eval_model(model, data_loader, criterion, device):
+                model.eval()
+                total_loss = 0
+                total_correct = 0
+                total_samples = 0
+                
+                with torch.no_grad():
+                    for batch in data_loader:
+                        input_ids = batch['input_ids'].to(device)
+                        attention_mask = batch['attention_mask'].to(device)
+                        labels = batch['labels'].to(device)
+                        
+                        outputs = model(input_ids, attention_mask)
+                        loss = criterion(outputs, labels)
+                        
+                        total_loss += loss.item()
+                        _, preds = torch.max(outputs, dim=1)
+                        total_correct += torch.sum(preds == labels).item()
+                        total_samples += labels.size(0)
+                
+                return total_loss / len(data_loader), total_correct / total_samples
+            
+            logger.info("Loading data from %s...", csv_path_val)
+            df = pd.read_csv(csv_path_val)
+            
+            label_encoder = LabelEncoder()
+            df['encoded_label'] = label_encoder.fit_transform(df[label_column_val])
+            num_classes = len(label_encoder.classes_)
+            
+            logger.info("Number of samples: %d", len(df))
+            logger.info("Number of classes: %d", num_classes)
+            
+            train_df, val_df = train_test_split(df, test_size=test_size_val, random_state=42)
+            
+            logger.info("Train samples: %d, Validation samples: %d", len(train_df), len(val_df))
+            
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_val)
+            
+            train_dataset = TextDataset(
+                texts=train_df[text_column_val].values,
+                labels=train_df['encoded_label'].values,
+                tokenizer=tokenizer,
+                max_len=max_sequence_length_val
+            )
+            
+            val_dataset = TextDataset(
+                texts=val_df[text_column_val].values,
+                labels=val_df['encoded_label'].values,
+                tokenizer=tokenizer,
+                max_len=max_sequence_length_val
+            )
+            
+            train_loader = DataLoader(train_dataset, batch_size=batch_size_val, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size_val)
+            
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            logger.info("Using device: %s", device)
+            
+            hidden_layers = [hidden_layer_1_val, hidden_layer_2_val]
+            
+            model = RoBERTaClassifier(
+                pretrained_model=pretrained_model_val,
+                num_classes=num_classes,
+                hidden_layers=hidden_layers,
+                dropout=dropout_val
+            )
+            model.to(device)
+            
+            optimizer = AdamW(model.parameters(), lr=learning_rate_val)
+            criterion = nn.CrossEntropyLoss()
+            
+            logger.info("Starting training for %d epochs...", num_epochs_val)
+            
+            metrics = {
+                "epochs": [],
+                "train_loss": [],
+                "train_accuracy": [],
+                "val_loss": [],
+                "val_accuracy": []
+            }
+            
+            for epoch in range(num_epochs_val):
+                logger.info("Epoch %d/%d", epoch + 1, num_epochs_val)
+                
+                train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
+                val_loss, val_acc = eval_model(model, val_loader, criterion, device)
+                
+                metrics["epochs"].append(epoch + 1)
+                metrics["train_loss"].append(float(train_loss))
+                metrics["train_accuracy"].append(float(train_acc))
+                metrics["val_loss"].append(float(val_loss))
+                metrics["val_accuracy"].append(float(val_acc))
+                
+                logger.info("Train Loss: %.4f | Train Acc: %.4f", train_loss, train_acc)
+                logger.info("Val Loss: %.4f | Val Acc: %.4f", val_loss, val_acc)
+            
+            logger.info("Saving model to %s", trained_model_path)
+            torch.save(model.state_dict(), trained_model_path)
+            
+            logger.info("Saving label encoder to %s", label_encoder_path)
+            with open(label_encoder_path, 'wb') as f:
+                pickle.dump(label_encoder, f)
+            
+            logger.info("Saving training metrics to %s", training_metrics_path)
+            with open(training_metrics_path, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            
+            logger.info("Training complete! Final validation accuracy: %.4f", val_acc)
         
+        import argparse
+        _parser = argparse.ArgumentParser()
+        _parser.add_argument("--csv_path", dest="csv_path_val", type=str, required=True)
+        _parser.add_argument("--text_column", dest="text_column_val", type=str, required=True)
+        _parser.add_argument("--label_column", dest="label_column_val", type=str, required=True)
+        _parser.add_argument("--test_size", dest="test_size_val", type=float, required=True)
+        _parser.add_argument("--max_sequence_length", dest="max_sequence_length_val", type=int, required=True)
+        _parser.add_argument("--hidden_layer_1", dest="hidden_layer_1_val", type=int, required=True)
+        _parser.add_argument("--hidden_layer_2", dest="hidden_layer_2_val", type=int, required=True)
+        _parser.add_argument("--dropout", dest="dropout_val", type=float, required=True)
+        _parser.add_argument("--batch_size", dest="batch_size_val", type=int, required=True)
+        _parser.add_argument("--learning_rate", dest="learning_rate_val", type=float, required=True)
+        _parser.add_argument("--num_epochs", dest="num_epochs_val", type=int, required=True)
+        _parser.add_argument("--pretrained_model", dest="pretrained_model_val", type=str, required=True)
+        _parser.add_argument("--trained_model", dest="trained_model_path", type=_make_parent_dirs_and_return_path, required=True)
+        _parser.add_argument("--label_encoder", dest="label_encoder_path", type=_make_parent_dirs_and_return_path, required=True)
+        _parser.add_argument("--training_metrics", dest="training_metrics_path", type=_make_parent_dirs_and_return_path, required=True)
+        _parsed_args = vars(_parser.parse_args())
+        train_roberta_classifier(**_parsed_args)
     args:
       - --csv_path
       - {inputValue: csv_path}
