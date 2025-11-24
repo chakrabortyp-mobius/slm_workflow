@@ -1,0 +1,103 @@
+name: Upload LoRA Outputs to CDN
+description: Uploads LoRA fine-tuning artifact directories to CDN.
+
+inputs:
+  - {name: bearer_token, type: string}
+  - {name: domain, type: String}
+  - {name: get_cdn, type: String}
+  - {name: lora_adapters, type: Model}
+  - {name: tokenizer_output, type: Model}
+  - {name: base_model_output, type: Model}
+
+outputs:
+  - {name: lora_adapters_url, type: String}
+  - {name: tokenizer_output_url, type: String}
+  - {name: base_model_output_url, type: String}
+
+implementation:
+  container:
+    image: python:3.8-slim
+    command:
+      - sh
+      - -ec
+      - |
+        if ! command -v curl &> /dev/null; then
+            apt-get update > /dev/null && apt-get install -y curl zip > /dev/null
+        fi
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, subprocess, json, os, uuid, shutil
+
+        parser = argparse.ArgumentParser()
+
+        parser.add_argument('--bearer_token')
+        parser.add_argument('--domain')
+        parser.add_argument('--get_cdn')
+
+        parser.add_argument('--lora_adapters')
+        parser.add_argument('--tokenizer_output')
+        parser.add_argument('--base_model_output')
+
+        parser.add_argument('--lora_adapters_url')
+        parser.add_argument('--tokenizer_output_url')
+        parser.add_argument('--base_model_output_url')
+
+        args = parser.parse_args()
+
+        with open(args.bearer_token) as f:
+            bearer = f.read().strip()
+
+        upload_url = (
+            f"{args.domain}"
+            "/mobius-content-service/v1.0/content/upload"
+            "?filePathAccess=private&filePath=%2Flora%2F"
+        )
+
+        def upload_dir(dir_path, output_path, prefix):
+            zip_path = f"/tmp/{prefix}_{uuid.uuid4()}.zip"
+            shutil.make_archive(zip_path.replace(".zip",""), "zip", dir_path)
+
+            curl_cmd = [
+                "curl", "--location", upload_url,
+                "--header", f"Authorization: Bearer {bearer}",
+                "--form", f"file=@{zip_path}",
+                "--fail", "--show-error"
+            ]
+
+            proc = subprocess.run(curl_cmd, capture_output=True, check=True)
+            resp = json.loads(proc.stdout.decode())
+            cdn_rel = resp["cdnUrl"]
+            final_url = f"{args.get_cdn}{cdn_rel}"
+
+            with open(output_path, "w") as f:
+                f.write(final_url)
+            return final_url
+
+        upload_dir(args.lora_adapters, args.lora_adapters_url, "lora")
+        upload_dir(args.tokenizer_output, args.tokenizer_output_url, "tokenizer")
+        upload_dir(args.base_model_output, args.base_model_output_url, "base")
+
+    args:
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --domain
+      - {inputValue: domain}
+      - --get_cdn
+      - {inputValue: get_cdn}
+
+      - --lora_adapters
+      - {inputPath: lora_adapters}
+      - --tokenizer_output
+      - {inputPath: tokenizer_output}
+      - --base_model_output
+      - {inputPath: base_model_output}
+
+      - --lora_adapters_url
+      - {outputPath: lora_adapters_url}
+      - --tokenizer_output_url
+      - {outputPath: tokenizer_output_url}
+      - --base_model_output_url
+      - {outputPath: base_model_output_url}
