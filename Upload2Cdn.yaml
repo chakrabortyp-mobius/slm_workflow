@@ -1,4 +1,4 @@
-name: Upload LoRA Outputs to CDN
+name: Upload2Cdn
 description: Uploads LoRA fine-tuning artifact directories to CDN.
 
 inputs:
