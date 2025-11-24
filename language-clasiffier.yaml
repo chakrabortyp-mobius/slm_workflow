@@ -1,6 +1,6 @@
 name: Train RoBERTa Classifier 1
 inputs:
-  - {name: csv_path, type: String}
+  - {name: csv_dir, type: String}
   - {name: text_column, type: String}
   - {name: label_column, type: String}
   - {name: test_size, type: Float}
@@ -35,7 +35,7 @@ implementation:
             return file_path
         
         def train_roberta_classifier(
-            csv_path_val,
+            csv_dir_val,
             text_column_val,
             label_column_val,
             test_size_val,
@@ -54,6 +54,7 @@ implementation:
             import logging
             import json
             import pickle
+            import os
             import pandas as pd
             from sklearn.model_selection import train_test_split
             from sklearn.preprocessing import LabelEncoder
@@ -65,6 +66,13 @@ implementation:
             
             logging.basicConfig(level=logging.INFO)
             logger = logging.getLogger("roberta_classifier")
+            
+            # Construct the CSV path from the directory
+            csv_path_val = os.path.join(csv_dir_val, 'data.csv')
+            logger.info("Looking for CSV at: %s", csv_path_val)
+            
+            if not os.path.exists(csv_path_val):
+                raise FileNotFoundError(f"CSV file not found at {csv_path_val}")
             
             class TextDataset(Dataset):
                 def __init__(self, texts, labels, tokenizer, max_len):
@@ -258,7 +266,7 @@ implementation:
         
         import argparse
         _parser = argparse.ArgumentParser()
-        _parser.add_argument("--csv_path", dest="csv_path_val", type=str, required=True)
+        _parser.add_argument("--csv_dir", dest="csv_dir_val", type=str, required=True)
         _parser.add_argument("--text_column", dest="text_column_val", type=str, required=True)
         _parser.add_argument("--label_column", dest="label_column_val", type=str, required=True)
         _parser.add_argument("--test_size", dest="test_size_val", type=float, required=True)
@@ -276,8 +284,8 @@ implementation:
         _parsed_args = vars(_parser.parse_args())
         train_roberta_classifier(**_parsed_args)
     args:
-      - --csv_path
-      - {inputPath: csv_path}
+      - --csv_dir
+      - {inputPath: csv_dir}
       - --text_column
       - {inputValue: text_column}
       - --label_column
