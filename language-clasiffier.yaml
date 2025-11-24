@@ -1,4 +1,4 @@
-name: Train RoBERTa Classifier1
+name: Train RoBERTa Classifier 1
 inputs:
   - {name: csv_path, type: String}
   - {name: text_column, type: String}
@@ -60,7 +60,8 @@ implementation:
             import torch
             import torch.nn as nn
             from torch.utils.data import DataLoader, Dataset
-            from transformers import AutoTokenizer, AutoModel, AdamW
+            from transformers import AutoTokenizer, AutoModel
+            from torch.optim import AdamW
             
             logging.basicConfig(level=logging.INFO)
             logger = logging.getLogger("roberta_classifier")
@@ -276,7 +277,7 @@ implementation:
         train_roberta_classifier(**_parsed_args)
     args:
       - --csv_path
-      - {inputValue: csv_path}
+      - {inputPath: csv_path}
       - --text_column
       - {inputValue: text_column}
       - --label_column
