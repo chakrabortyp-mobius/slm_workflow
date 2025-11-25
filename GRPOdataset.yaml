@@ -9,8 +9,6 @@ inputs:
 outputs:
   - {name: grpo_dataset, type: Dataset, description: 'Processed dataset for GRPO training'}
 
-
-
 implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v24-gpu
@@ -29,20 +27,21 @@ implementation:
         from datasets import load_dataset
         import argparse
 
+        # Regex to parse chat template blocks
         BLOCK_RE = re.compile(
             r"<\|im_start\|\>(.*?)\n(.*?)<\|im_end\|\>",
-            re.S
+            re.DOTALL
         )
 
         def parse_chat_blocks(text):
-            
+
             blocks = []
             for role, content in BLOCK_RE.findall(text):
                 blocks.append({"role": role.strip(), "content": content.strip()})
             return blocks
 
         def convert(example):
-            
+
             if "text" not in example:
                 return None
 
@@ -52,7 +51,7 @@ implementation:
             user_block = None
             assistant_block = None
 
-            # iterate in order
+            # Iterate through blocks in order
             for b in blocks:
                 role = b["role"]
                 content = b["content"]
@@ -67,23 +66,23 @@ implementation:
                     assistant_block = b
                     break
 
-            # must have system + user + assistant
+            # Must have system + user + assistant
             if system_block is None or user_block is None or assistant_block is None:
                 return None
 
-            # skip if first assistant DOES NOT contain <tool_call>
+            # Skip if first assistant response does NOT contain tool_call
             if "<tool_call>" not in assistant_block["content"]:
                 return None
 
-            # Build prompt
+            # Build prompt (everything up to assistant response)
             prompt = (
-                f"<|im_start|>system\n{system_block['content']}<|im_end|>\n"
-                f"<|im_start|>user\n{user_block['content']}<|im_end|>"
+                "<|im_start|>system\n" + system_block["content"] + "<|im_end|>\n" +
+                "<|im_start|>user\n" + user_block["content"] + "<|im_end|>"
             )
 
-            # Build answer
+            # Build answer (the expected assistant response)
             answer = (
-                f"<|im_start|>assistant\n{assistant_block['content']}<|im_end|>"
+                "<|im_start|>assistant\n" + assistant_block["content"] + "<|im_end|>"
             )
 
             return {"prompt": prompt, "answer": answer}
@@ -96,46 +95,58 @@ implementation:
             parser.add_argument('--grpo_dataset', type=str, required=True)
             args = parser.parse_args()
 
-            print("========================================")
+            print("========================")
             print("Tool Calling GRPO Data Preparation")
-            print(f"Dataset: {args.dataset_name}")
-            print(f"Split: {args.dataset_split}")
-            print("========================================")
+            print("Dataset:", args.dataset_name)
+            print("Split:", args.dataset_split)
+            print("============================")
 
-            # Load dataset
+            # Load dataset from HuggingFace
+            print("Loading dataset...")
             dataset = load_dataset(args.dataset_name, split=args.dataset_split)
-            print(f"Loaded {len(dataset)} examples")
+            print("Loaded", len(dataset), "examples")
 
+            # Limit to max_samples if specified
             if args.max_samples > 0:
                 dataset = dataset.select(range(min(args.max_samples, len(dataset))))
-                print(f"Using first {len(dataset)} samples")
+                print("Using first", len(dataset), "samples")
 
-            # Map to GRPO format
+            # Convert to GRPO format
+            print("Processing dataset...")
             processed = dataset.map(
                 convert,
                 remove_columns=dataset.column_names
             )
 
-            # Filter out failed conversions
+            # Filter out failed conversions (None values)
+            original_size = len(processed)
             processed = processed.filter(lambda x: x["prompt"] is not None)
+            print("Filtered:", len(processed), "valid examples (from", original_size, ")")
 
             # Print sample
-            print("\n=== Sample Processed Example ===")
-            print("PROMPT:\n", processed[0]["prompt"])
-            print("\nANSWER:\n", processed[0]["answer"])
-            print("================================")
+            if len(processed) > 0:
+                print("\n" + "=" * 60)
+                print("SAMPLE PROCESSED EXAMPLE:")
+                print("-" * 60)
+                print("PROMPT:")
+                print(processed[0]["prompt"][:300], "...")
+                print("\nANSWER:")
+                print(processed[0]["answer"][:300], "...")
+                print("=" * 60)
 
-            # Save as pickle for GRPO
+            # Save as pickle for GRPO trainer
             out_dir = os.path.dirname(args.grpo_dataset)
-            os.makedirs(out_dir, exist_ok=True)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
 
             with open(args.grpo_dataset, "wb") as f:
                 pickle.dump(processed, f)
 
-            print("================================")
+            print("=========================")
+            print("SUCCESS!")
             print("Saved GRPO dataset to:", args.grpo_dataset)
             print("Total processed examples:", len(processed))
-            print("================================")
+            print("=========================")
 
         if __name__ == '__main__':
             main()
