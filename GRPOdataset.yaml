@@ -1,4 +1,4 @@
-name: Tool Calling GRPO Data Preparation
+name: GRPOdataset
 description: Prepares tool-calling dataset for GRPO training with correct prompt/answer extraction
 
 inputs:
