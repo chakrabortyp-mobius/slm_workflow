@@ -32,7 +32,7 @@ implementation:
             start_tag = "<" + pipe + "im_start" + pipe + ">"
             end_tag = "<" + pipe + "im_end" + pipe + ">"
             
-            pattern = re.escape(start_tag) + r"(.*?)\n(.*?)" + re.escape(end_tag)
+            pattern = re.escape(start_tag) + r"(.*?)\\n(.*?)" + re.escape(end_tag)
             BLOCK_RE = re.compile(pattern, re.DOTALL)
             
             blocks = []
