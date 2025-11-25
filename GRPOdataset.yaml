@@ -28,9 +28,11 @@ implementation:
         import argparse
 
         def parse_chat_blocks(text):
+            pipe = chr(124)
+            start_tag = "<" + pipe + "im_start" + pipe + ">"
+            end_tag = "<" + pipe + "im_end" + pipe + ">"
             
-            # Build regex pattern dynamically to avoid YAML issues
-            pattern = r"<" + r"\|im_start\|" + r">(.*?)\n(.*?)<" + r"\|im_end\|" + r">"
+            pattern = re.escape(start_tag) + r"(.*?)\n(.*?)" + re.escape(end_tag)
             BLOCK_RE = re.compile(pattern, re.DOTALL)
             
             blocks = []
