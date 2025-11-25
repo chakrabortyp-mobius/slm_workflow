@@ -27,21 +27,19 @@ implementation:
         from datasets import load_dataset
         import argparse
 
-        # Regex to parse chat template blocks
-        BLOCK_RE = re.compile(
-            r"<\|im_start\|\>(.*?)\n(.*?)<\|im_end\|\>",
-            re.DOTALL
-        )
-
         def parse_chat_blocks(text):
-
+            
+            # Build regex pattern dynamically to avoid YAML issues
+            pattern = r"<" + r"\|im_start\|" + r">(.*?)\n(.*?)<" + r"\|im_end\|" + r">"
+            BLOCK_RE = re.compile(pattern, re.DOTALL)
+            
             blocks = []
             for role, content in BLOCK_RE.findall(text):
                 blocks.append({"role": role.strip(), "content": content.strip()})
             return blocks
 
         def convert(example):
-
+            
             if "text" not in example:
                 return None
 
@@ -75,14 +73,17 @@ implementation:
                 return None
 
             # Build prompt (everything up to assistant response)
+            im_start = "<" + "|im_start|" + ">"
+            im_end = "<" + "|im_end|" + ">"
+            
             prompt = (
-                "<|im_start|>system\n" + system_block["content"] + "<|im_end|>\n" +
-                "<|im_start|>user\n" + user_block["content"] + "<|im_end|>"
+                im_start + "system\n" + system_block["content"] + im_end + "\n" +
+                im_start + "user\n" + user_block["content"] + im_end
             )
 
             # Build answer (the expected assistant response)
             answer = (
-                "<|im_start|>assistant\n" + assistant_block["content"] + "<|im_end|>"
+                im_start + "assistant\n" + assistant_block["content"] + im_end
             )
 
             return {"prompt": prompt, "answer": answer}
@@ -95,11 +96,11 @@ implementation:
             parser.add_argument('--grpo_dataset', type=str, required=True)
             args = parser.parse_args()
 
-            print("========================")
+            print("=" * 60)
             print("Tool Calling GRPO Data Preparation")
             print("Dataset:", args.dataset_name)
             print("Split:", args.dataset_split)
-            print("============================")
+            print("=" * 60)
 
             # Load dataset from HuggingFace
             print("Loading dataset...")
@@ -125,14 +126,14 @@ implementation:
 
             # Print sample
             if len(processed) > 0:
-                print("\n" + "=" * 60)
+                print("\n" + "=")
                 print("SAMPLE PROCESSED EXAMPLE:")
-                print("-" * 60)
+                print("-")
                 print("PROMPT:")
                 print(processed[0]["prompt"][:300], "...")
                 print("\nANSWER:")
                 print(processed[0]["answer"][:300], "...")
-                print("=" * 60)
+                print("=")
 
             # Save as pickle for GRPO trainer
             out_dir = os.path.dirname(args.grpo_dataset)
@@ -142,11 +143,11 @@ implementation:
             with open(args.grpo_dataset, "wb") as f:
                 pickle.dump(processed, f)
 
-            print("=========================")
+            print("\n" + "=")
             print("SUCCESS!")
             print("Saved GRPO dataset to:", args.grpo_dataset)
             print("Total processed examples:", len(processed))
-            print("=========================")
+            print("=")
 
         if __name__ == '__main__':
             main()
