@@ -35,14 +35,14 @@ implementation:
         )
 
         def parse_chat_blocks(text):
-            """Extract list of {'role':..., 'content':...} blocks."""
+            
             blocks = []
             for role, content in BLOCK_RE.findall(text):
                 blocks.append({"role": role.strip(), "content": content.strip()})
             return blocks
 
         def convert(example):
-            """Extract system + user → prompt, assistant_with_toolcall → answer."""
+            
             if "text" not in example:
                 return None
 
