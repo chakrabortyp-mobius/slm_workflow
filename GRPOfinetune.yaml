@@ -1,4 +1,4 @@
-name: GRPO Tool Calling Training
+name: GRPOfinetune
 description: Trains a LoRA fine-tuned model using GRPO with Unsloth for tool-calling improvement
 
 inputs:
