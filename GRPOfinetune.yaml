@@ -132,15 +132,7 @@ implementation:
             
 
             # Define reward functions for tool calling quality
-            tool_call_end_regex = re.escape(args.tool_call_end) + r"[\s]{0,}" + \
-                "(?:" + re.escape(tokenizer.eos_token) + ")?"
 
-            # Regex to match complete tool calling format
-            match_format = re.compile(
-                rf"{re.escape(args.think_end)}.*?"\
-                rf"{re.escape(args.tool_call_start)}(.+?){tool_call_end_regex}",
-                flags=re.MULTILINE | re.DOTALL
-            )
 
             # Reward function 1: Exact format matching (highest reward)
             def match_format_exactly(completions, **kwargs):
