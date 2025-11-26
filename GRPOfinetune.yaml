@@ -2,25 +2,25 @@ name: GRPOfinetune
 description: Trains a LoRA fine-tuned model using GRPO with Unsloth for tool-calling improvement
 
 inputs:
-  - {name: base_model_name, type: String, description: 'Original base model name (e.g., Qwen/Qwen2-0.5B)'}
-  - {name: lora_adapters, type: Model, description: 'LoRA adapter weights from previous training'}
-  - {name: dataset, type: Dataset, description: 'Dataset with prompt and answer columns'}
-  - {name: max_seq_length, type: Integer, description: 'Maximum sequence length (e.g., 2048)'}
-  - {name: lora_rank, type: Integer, description: 'LoRA rank (same as SFT training)'}
-  - {name: learning_rate, type: Float, description: 'Learning rate (typically 5e-6)'}
-  - {name: num_train_steps, type: Integer, description: 'Number of training steps (e.g., 100-500)'}
-  - {name: batch_size, type: Integer, description: 'Per-device batch size'}
-  - {name: grad_accum_steps, type: Integer, description: 'Gradient accumulation steps'}
-  - {name: num_generations, type: Integer, description: 'Number of generations per prompt (4-8)'}
-  - {name: temperature, type: Float, description: 'Sampling temperature (1.0 recommended)'}
-  - {name: tool_call_start, type: String, description: 'Tool call start token (e.g., <tool_call>)'}
-  - {name: tool_call_end, type: String, description: 'Tool call end token (e.g., </tool_call>)'}
-  - {name: think_start, type: String, description: 'Thinking start token (e.g., <think>)'}
-  - {name: think_end, type: String, description: 'Thinking end token (e.g., </think>)'}
-  - {name: custom_chat_template, type: String, description: 'Custom Jinja2 chat template string (optional, leave empty for default)'}
+  - {name: base_model_name, type: String}
+  - {name: lora_adapters, type: Model}
+  - {name: dataset, type: Dataset}
+  - {name: max_seq_length, type: Integer}
+  - {name: lora_rank, type: Integer}
+  - {name: learning_rate, type: Float}
+  - {name: num_train_steps, type: Integer}
+  - {name: batch_size, type: Integer}
+  - {name: grad_accum_steps, type: Integer}
+  - {name: num_generations, type: Integer}
+  - {name: temperature, type: Float}
+  - {name: tool_call_start, type: String}
+  - {name: tool_call_end, type: String}
+  - {name: think_start, type: String}
+  - {name: think_end, type: String}
+  - {name: custom_chat_template, type: String}
 
 outputs:
-  - {name: grpo_model, type: Model, description: 'GRPO-trained LoRA adapters'}
+  - {name: grpo_model, type: Model}
 
 
 
