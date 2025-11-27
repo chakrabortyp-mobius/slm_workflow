@@ -109,12 +109,12 @@ implementation:
 
             # Display samples
             if len(processed) > 0:
-                print("\n=======================================")
+                print("\\n=======================================")
                 print("SAMPLE PROCESSED EXAMPLE:")
                 print("=======================================")
                 print("PROMPT:")
                 print(processed[0]["prompt"])
-                print("\nANSWER:")
+                print("\\nANSWER:")
                 print(processed[0]["answer"])
                 print("=======================================")
 
@@ -126,7 +126,7 @@ implementation:
             with open(args.grpo_dataset, "wb") as f:
                 pickle.dump(processed, f)
 
-            print("\n==========================================")
+            print("\\n==========================================")
             print("SUCCESS!")
             print(f"Saved GRPO dataset to: {args.grpo_dataset}")
             print(f"Total examples: {len(processed)}")
