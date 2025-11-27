@@ -1,19 +1,19 @@
 name: GRPO Training with Unsloth
-description: Trains LoRA fine-tuned model using GRPO with Unsloth for tool-calling improvement
+description: Continues training from SFT LoRA using GRPO with Unsloth
 
 inputs:
-  - {name: base_model_name, type: String, description: 'Base model name (e.g., Qwen/Qwen2-0.5B-Instruct)'}
+  - {name: base_model_path, type: Model, description: 'Base model with resized embeddings from SFT'}
+  - {name: lora_adapters_path, type: Model, description: 'SFT LoRA adapters to continue from'}
+  - {name: tokenizer_path, type: Model, description: 'Tokenizer with special tokens from SFT'}
   - {name: grpo_dataset, type: Dataset, description: 'Pickle dataset with prompt and answer'}
   - {name: max_seq_length, type: Integer, description: 'Maximum sequence length (e.g., 2048)'}
-  - {name: lora_rank, type: Integer, description: 'LoRA rank (e.g., 16 or 32)'}
+  - {name: lora_rank, type: Integer, description: 'LoRA rank from SFT (e.g., 16 or 32)'}
   - {name: learning_rate, type: Float, description: 'Learning rate (e.g., 5e-6)'}
   - {name: num_train_steps, type: Integer, description: 'Training steps (e.g., 100-500)'}
   - {name: batch_size, type: Integer, description: 'Per-device batch size'}
   - {name: grad_accum_steps, type: Integer, description: 'Gradient accumulation steps'}
   - {name: num_generations, type: Integer, description: 'Generations per prompt (4-8)'}
   - {name: temperature, type: Float, description: 'Sampling temperature (0.8-1.0)'}
-  - {name: special_tokens, type: String, description: 'Comma-separated special tokens'}
-  - {name: chat_template, type: String, description: 'Chat template (Jinja2 format)'}
 
 outputs:
   - {name: grpo_model, type: Model, description: 'GRPO-trained LoRA adapters'}
@@ -53,7 +53,9 @@ implementation:
         def main():
             check_gpu()
             parser = argparse.ArgumentParser()
-            parser.add_argument('--base_model_name', type=str, required=True)
+            parser.add_argument('--base_model_path', type=str, required=True)
+            parser.add_argument('--lora_adapters_path', type=str, required=True)
+            parser.add_argument('--tokenizer_path', type=str, required=True)
             parser.add_argument('--grpo_dataset', type=str, required=True)
             parser.add_argument('--max_seq_length', type=int, required=True)
             parser.add_argument('--lora_rank', type=int, required=True)
@@ -63,13 +65,13 @@ implementation:
             parser.add_argument('--grad_accum_steps', type=int, required=True)
             parser.add_argument('--num_generations', type=int, required=True)
             parser.add_argument('--temperature', type=float, required=True)
-            parser.add_argument('--special_tokens', type=str, required=True)
-            parser.add_argument('--chat_template', type=str, required=True)
             parser.add_argument('--grpo_model', type=str, required=True)
             args = parser.parse_args()
             print("=" * 60)
-            print("GRPO Training with Unsloth")
-            print(f"Base Model: {args.base_model_name}")
+            print("GRPO Training with Unsloth (Continuing from SFT)")
+            print(f"Base Model: {args.base_model_path}")
+            print(f"SFT LoRA Adapters: {args.lora_adapters_path}")
+            print(f"Tokenizer: {args.tokenizer_path}")
             print(f"Max Seq Length: {args.max_seq_length}")
             print(f"LoRA Rank: {args.lora_rank}")
             print(f"Learning Rate: {args.learning_rate}")
@@ -86,38 +88,38 @@ implementation:
             print(f"Dataset loaded: {len(dataset)} examples")
             print(f"Sample prompt: {dataset[0]['prompt']}")
             print(f"Sample answer: {dataset[0]['answer'][:100]}...")
-            print("Loading model with Unsloth...")
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=args.base_model_name,
+            print("Loading tokenizer from SFT training...")
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, trust_remote_code=True)
+            print(f"Tokenizer loaded, vocab size: {len(tokenizer)}")
+            print("Loading base model with resized embeddings from SFT...")
+            model, _ = FastLanguageModel.from_pretrained(
+                model_name=args.base_model_path,
                 max_seq_length=args.max_seq_length,
                 load_in_4bit=True,
                 fast_inference=True,
                 max_lora_rank=args.lora_rank,
                 gpu_memory_utilization=0.9,
             )
-            print("Model loaded successfully")
-            if args.special_tokens and args.special_tokens.strip() and args.special_tokens.strip() != "None":
-                cleaned_tokens = args.special_tokens.strip().strip('"').strip("'")
-                special_tokens_list = [t.strip() for t in cleaned_tokens.split(",") if t.strip()]
-                if special_tokens_list:
-                    print(f"Adding {len(special_tokens_list)} special tokens")
-                    special_tokens_dict = {"additional_special_tokens": special_tokens_list}
-                    tokenizer.add_special_tokens(special_tokens_dict)
-                    model.resize_token_embeddings(len(tokenizer))
-                    print(f"Tokenizer vocab size: {len(tokenizer)}")
-            if args.chat_template and args.chat_template.strip() and args.chat_template.strip() != "None":
-                print("Setting custom chat template")
-                tokenizer.chat_template = args.chat_template
-            print("Applying LoRA with Unsloth...")
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=args.lora_rank,
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-                lora_alpha=args.lora_rank,
-                use_gradient_checkpointing="unsloth",
-                random_state=3407,
-            )
-            print("LoRA applied successfully")
+            print("Base model loaded successfully")
+            sft_adapter_path = os.path.join(args.lora_adapters_path, "adapter")
+            if os.path.exists(sft_adapter_path):
+                print(f"Loading SFT LoRA adapters from {sft_adapter_path}")
+                from peft import PeftModel
+                model = PeftModel.from_pretrained(model, sft_adapter_path, is_trainable=True)
+                print("SFT LoRA adapters loaded and set to trainable")
+            else:
+                print(f"ERROR: SFT adapter not found at {sft_adapter_path}")
+                print("Creating new LoRA adapters instead...")
+                model = FastLanguageModel.get_peft_model(
+                    model,
+                    r=args.lora_rank,
+                    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                    lora_alpha=args.lora_rank,
+                    use_gradient_checkpointing="unsloth",
+                    random_state=3407,
+                )
+                print("New LoRA created")
             print("Defining reward functions...")
             def format_reward_func(completions, **kwargs):
                 scores = []
@@ -233,8 +235,12 @@ implementation:
         if __name__ == '__main__':
             main()
     args:
-      - --base_model_name
-      - {inputValue: base_model_name}
+      - --base_model_path
+      - {inputPath: base_model_path}
+      - --lora_adapters_path
+      - {inputPath: lora_adapters_path}
+      - --tokenizer_path
+      - {inputPath: tokenizer_path}
       - --grpo_dataset
       - {inputPath: grpo_dataset}
       - --max_seq_length
@@ -253,9 +259,5 @@ implementation:
       - {inputValue: num_generations}
       - --temperature
       - {inputValue: temperature}
-      - --special_tokens
-      - {inputValue: special_tokens}
-      - --chat_template
-      - {inputValue: chat_template}
       - --grpo_model
       - {outputPath: grpo_model}
