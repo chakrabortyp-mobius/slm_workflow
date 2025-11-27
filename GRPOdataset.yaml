@@ -1,13 +1,9 @@
 name: GRPOdataset
-description: Prepares tool-calling dataset for GRPO training using chat template
+description: Prepares clean tool-calling dataset for GRPO training (no chat template)
 
 inputs:
   - {name: dataset_name, type: String, description: 'HuggingFace dataset name'}
   - {name: dataset_split, type: String, description: 'Dataset split name'}
-  - {name: model_name, type: String, description: 'Model name for tokenizer'}
-  - {name: chat_template, type: String, description: 'Custom chat template (Jinja2 format)'}
-  - {name: special_tokens, type: String, description: 'Comma-separated special tokens'}
-  - {name: max_samples, type: Integer, description: 'Max number of samples (0 = all)'}
 
 outputs:
   - {name: grpo_dataset, type: Dataset, description: 'Processed dataset for GRPO training'}
@@ -27,118 +23,122 @@ implementation:
         import os
         import pickle
         from datasets import load_dataset
-        from transformers import AutoTokenizer
+        from collections import OrderedDict
         import argparse
+
         def main():
             parser = argparse.ArgumentParser()
             parser.add_argument('--dataset_name', type=str, required=True)
             parser.add_argument('--dataset_split', type=str, required=True)
-            parser.add_argument('--model_name', type=str, required=True)
-            parser.add_argument('--chat_template', type=str, required=True)
-            parser.add_argument('--special_tokens', type=str, required=True)
-            parser.add_argument('--max_samples', type=int, required=True)
             parser.add_argument('--grpo_dataset', type=str, required=True)
             args = parser.parse_args()
+
             print("===================================================")
-            print("GRPO Dataset Preparation")
+            print("GRPO Dataset Preparation (NO Chat Template)")
             print("Dataset:", args.dataset_name)
             print("Split:", args.dataset_split)
-            print("Model:", args.model_name)
-            print("====================================================")
-            print("Loading tokenizer...")
-            tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
-            if args.special_tokens and args.special_tokens.strip() and args.special_tokens.strip() != "None":
-                cleaned_tokens = args.special_tokens.strip().strip('"').strip("'")
-                special_tokens_list = [t.strip() for t in cleaned_tokens.split(",") if t.strip()]
-                if special_tokens_list:
-                    print(f"Adding {len(special_tokens_list)} special tokens: {special_tokens_list}")
-                    special_tokens_dict = {"additional_special_tokens": special_tokens_list}
-                    num_added = tokenizer.add_special_tokens(special_tokens_dict)
-                    print(f"Successfully added {num_added} special tokens")
-            if args.chat_template and args.chat_template.strip() and args.chat_template.strip() != "None":
-                print("Setting custom chat template")
-                tokenizer.chat_template = args.chat_template
-                print("Chat template set successfully")
+            print("===================================================")
+
             print("Loading dataset...")
             dataset = load_dataset(args.dataset_name, split=args.dataset_split)
             print(f"Loaded {len(dataset)} examples")
-            if args.max_samples > 0:
-                dataset = dataset.select(range(min(args.max_samples, len(dataset))))
-                print(f"Limited to {len(dataset)} samples")
+
+            # --- NORMALIZATION FUNCTION ---
             def convert_to_grpo_format(example):
                 if "conversations" not in example:
                     return {"prompt": None, "answer": None}
+
                 convos = example["conversations"]
+
+                # Role normalization
+                role_map = {
+                    "human": "user",
+                    "gpt": "assistant",
+                    "model": "assistant",
+                    "assistant": "assistant",
+                    "system": "system",
+                    "tool": "tool",
+                }
+
+                # Find first tool_call from model
                 tool_call_index = None
                 for i, conv in enumerate(convos):
-                    role = conv.get("role", conv.get("from", ""))
-                    content = conv.get("content", conv.get("value", ""))
-                    if role in ["model", "gpt", "assistant"] and "<tool_call>" in content:
+                    role = conv.get("role") or conv.get("from", "")
+                    content = conv.get("content") or conv.get("value", "")
+                    if role in ["model"] and "<tool_call>" in content:
                         tool_call_index = i
                         break
+
                 if tool_call_index is None:
                     return {"prompt": None, "answer": None}
-                truncated_convos = []
-                for i in range(tool_call_index):
-                    conv = convos[i]
-                    role = conv.get("role", conv.get("from", ""))
-                    content = conv.get("content", conv.get("value", ""))
-                    truncated_convos.append({"role": role, "content": content})
-                try:
-                    prompt_messages = tokenizer.apply_chat_template(truncated_convos, tokenize=False, add_generation_prompt=False)
-                except Exception as e:
-                    print(f"Error applying chat template to prompt: {e}")
+
+                # Build prompt list
+                prompt_messages = []
+                for conv in convos[:tool_call_index]:
+                    raw_role = conv.get("role") or conv.get("from", "")
+                    mapped_role = role_map.get(raw_role, "user")
+                    content = conv.get("content") or conv.get("value", "")
+
+                    prompt_messages.append(
+                        OrderedDict([
+                            ("role", mapped_role),
+                            ("content", content),
+                        ])
+                    )
+
+                # Extract answer content
+                answer_conv = convos[tool_call_index]
+                answer_content = answer_conv.get("content") or answer_conv.get("value", "")
+
+                if not prompt_messages or not answer_content:
                     return {"prompt": None, "answer": None}
-                last_conv = convos[tool_call_index]
-                last_role = last_conv.get("role", last_conv.get("from", ""))
-                last_content = last_conv.get("content", last_conv.get("value", ""))
-                last_message = [{"role": last_role, "content": last_content}]
-                try:
-                    answer_content = tokenizer.apply_chat_template(last_message, tokenize=False, add_generation_prompt=False)
-                except Exception as e:
-                    print(f"Error applying chat template to answer: {e}")
-                    return {"prompt": None, "answer": None}
-                return {"prompt": prompt_messages, "answer": answer_content}
+
+                return {
+                    "prompt": prompt_messages,
+                    "answer": answer_content
+                }
+
+            # Apply transformation
             print("Processing dataset...")
             processed = dataset.map(convert_to_grpo_format, remove_columns=dataset.column_names)
+
             original_size = len(processed)
             processed = processed.filter(lambda x: x["prompt"] is not None and x["answer"] is not None)
+
             print(f"Filtered to {len(processed)} valid examples (from {original_size})")
+
+            # Display samples
             if len(processed) > 0:
-                print("\\n" + "=======================================")
+                print("\n=======================================")
                 print("SAMPLE PROCESSED EXAMPLE:")
-                print("=============================================")
+                print("=======================================")
                 print("PROMPT:")
-                print(processed[0]["prompt"][:300])
-                print("...")
-                print("\\nANSWER:")
-                print(processed[0]["answer"][:300])
-                print("...")
-                print("===============================================")
+                print(processed[0]["prompt"])
+                print("\nANSWER:")
+                print(processed[0]["answer"])
+                print("=======================================")
+
+            # Save dataset as pickle
             out_dir = os.path.dirname(args.grpo_dataset)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
+
             with open(args.grpo_dataset, "wb") as f:
                 pickle.dump(processed, f)
-            print("\\n" + "==========================================")
+
+            print("\n==========================================")
             print("SUCCESS!")
             print(f"Saved GRPO dataset to: {args.grpo_dataset}")
             print(f"Total examples: {len(processed)}")
             print("==========================================")
+
         if __name__ == '__main__':
             main()
+
     args:
       - --dataset_name
       - {inputValue: dataset_name}
       - --dataset_split
       - {inputValue: dataset_split}
-      - --model_name
-      - {inputValue: model_name}
-      - --chat_template
-      - {inputValue: chat_template}
-      - --special_tokens
-      - {inputValue: special_tokens}
-      - --max_samples
-      - {inputValue: max_samples}
       - --grpo_dataset
       - {outputPath: grpo_dataset}
