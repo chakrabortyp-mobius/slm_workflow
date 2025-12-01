@@ -1,5 +1,5 @@
-name: Train_GNN_FF
-description: V Trains GNN models with Traditional Backpropagation, CAFO, or Forward Forward methods.
+name: V Train_GNN_FF
+description: Trains GNN 
 inputs:
   - {name: data_path, type: Dataset}           
   - {name: model, type: Model}            
