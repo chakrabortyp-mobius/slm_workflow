@@ -353,9 +353,9 @@ implementation:
                 print(f"Created directory: {output_dir}")
             
             torch.save(model.state_dict(), args.trained_model)
-            print(f"✅ Saved trained model to {args.trained_model}")
+            print(f" Saved trained model to {args.trained_model}")
         except Exception as e:
-            print(f"❌ Error saving trained model: {e}")
+            print(f" Error saving trained model: {e}")
             exit(1)
 
         # Save epoch loss data with training summary
@@ -390,9 +390,9 @@ implementation:
         print(f"Training method used: {training_mode.upper()}")
         
         if training_mode != 'traditional':
-            print(f"🔬 Advanced training completed successfully!")
+            print(f"Advanced training completed successfully!")
         
-        print("🏁 GNN Training workflow completed!")
+        print("GNN Training workflow completed!")
     args:
       - --data_path
       - {inputPath: data_path}
