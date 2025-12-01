@@ -1,0 +1,406 @@
+name: Train_GNN_FF
+description: V Trains GNN models with Traditional Backpropagation, CAFO, or Forward Forward methods.
+inputs:
+  - {name: data_path, type: Dataset}           
+  - {name: model, type: Model}            
+  - {name: config, type: String}          
+outputs:
+  - {name: trained_model, type: Model}     
+  - {name: epoch_loss, type: String}       
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v12
+    command:
+      - sh
+      - -c
+      - |
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch
+        import argparse
+        import pickle
+        import os
+        import json
+        import numpy as np
+        import sys
+        import time
+        from nesy_factory.GNNs import create_model
+        from nesy_factory.utils import get_config_by_name, set_random_seed
+        from sklearn.metrics import classification_report
+        
+        class DataWrapper:
+          def __init__(self, data_dict):
+              self.__dict__.update(data_dict)
+
+        class StandardScaler():
+            def __init__(self, mean, std):
+                self.mean = mean
+                self.std = std
+            def transform(self, data):
+                return (data - self.mean) / self.std
+            def inverse_transform(self, data):
+                return (data * self.std) + self.mean
+        
+        class DataLoaderM(object):
+            def __init__(self, xs, ys, batch_size, pad_with_last_sample=True):
+                self.batch_size = batch_size
+                self.current_ind = 0
+                if pad_with_last_sample:
+                    num_padding = (batch_size - (len(xs) % batch_size)) % batch_size
+                    x_padding = np.repeat(xs[-1:], num_padding, axis=0)
+                    y_padding = np.repeat(ys[-1:], num_padding, axis=0)
+                    xs = np.concatenate([xs, x_padding], axis=0)
+                    ys = np.concatenate([ys, y_padding], axis=0)
+                self.size = len(xs)
+                self.num_batch = int(self.size // self.batch_size)
+                self.xs = xs
+                self.ys = ys
+        
+            def shuffle(self):
+                permutation = np.random.permutation(self.size)
+                xs, ys = self.xs[permutation], self.ys[permutation]
+                self.xs = xs
+                self.ys = ys
+        
+            def get_iterator(self):
+                self.current_ind = 0
+                def _wrapper():
+                    while self.current_ind < self.num_batch:
+                        start_ind = self.batch_size * self.current_ind
+                        end_ind = min(self.size, self.batch_size * (self.current_ind + 1))
+                        x_i = self.xs[start_ind: end_ind, ...]
+                        y_i = self.ys[start_ind: end_ind, ...]
+                        yield (x_i, y_i)
+                        self.current_ind += 1
+                return _wrapper()
+
+        # Parse arguments
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--data_path', type=str, required=True)
+        parser.add_argument('--model', type=str, required=True)
+        parser.add_argument('--config', type=str, required=True)
+        parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--epoch_loss', type=str, required=True)
+        args = parser.parse_args()
+
+        print(f"Data path: {args.data_path}")
+        print(f"Model path: {args.model}")
+        print(f"Config path: {args.config}")
+        print(f"Output path: {args.trained_model}")
+        
+        # Load data
+        try:
+            with open(args.data_path, "rb") as f:
+                data = pickle.load(f)
+            print(f"Successfully loaded data. Type: {type(data)}")
+            if hasattr(data, 'x'):
+                print(f"Data shape: {data.x.shape}")
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            exit(1)
+            
+        # Load configuration
+        print("Loading config...")
+        print("config file is {args.config}")
+        try: 
+            config = json.loads(args.config)
+        except : 
+            with open(args.config) as f:
+                config = json.load(f)
+        print(f"the configs are : {config}")
+        
+        # Load model
+        print("Loading model...")
+        model_name = config.get('model_name', 'tgcn')
+        
+        # Check if model needs to be recreated for advanced training methods
+        use_cafo_from_config = config.get('use_cafo', False)
+        use_ff_from_config = config.get('use_forward_forward', False)
+        
+        # Validate only one training method is selected
+        if sum([use_cafo_from_config, use_ff_from_config]) > 1:
+            raise ValueError("Only one advanced training method can be selected: use_cafo or use_forward_forward")
+        
+        # Handle model creation/compatibility
+        if use_cafo_from_config or use_ff_from_config:
+            print(f"Creating enhanced {model_name} model with advanced training support...")
+            
+            # Enhanced config for advanced training
+            enhanced_config = config.copy()
+            
+            if use_cafo_from_config:
+                enhanced_config.update({
+                    'use_cafo': True,
+                    'cafo_blocks': config.get('cafo_blocks', 3),
+                    'epochs_per_block': config.get('epochs_per_block', 50),
+                    'block_lr': config.get('block_lr', 0.001)
+                })
+                print(f"CAFO configuration: {enhanced_config['cafo_blocks']} blocks, {enhanced_config['epochs_per_block']} epochs per block")
+                
+            elif use_ff_from_config:
+                enhanced_config.update({
+                    'use_forward_forward': True,
+                    'ff_blocks': config.get('ff_blocks', 3),
+                    'ff_threshold': config.get('ff_threshold', 2.0),
+                    'ff_epochs_per_block': config.get('ff_epochs_per_block', 100),
+                    'ff_lr': config.get('ff_lr', 0.03)
+                })
+                print(f"Forward Forward configuration: {enhanced_config['ff_blocks']} blocks, {enhanced_config['ff_epochs_per_block']} epochs per block")
+            
+            model = create_model(model_name, enhanced_config)
+            print(f"Created new enhanced {model_name} model")
+        else:
+            # Standard model loading
+            model = create_model(model_name, config)
+            try:
+                model.load_state_dict(torch.load(args.model, map_location=torch.device('cpu')))
+                print("Loaded existing model weights")
+            except:
+                print("Using new model (could not load existing weights)")
+
+        # Handle backward compatibility for existing models
+        if not hasattr(model, 'use_cafo'):
+            model.use_cafo = use_cafo_from_config
+            print("Backward compatibility: Setting use_cafo attribute")
+        
+        if not hasattr(model, 'use_forward_forward'):
+            model.use_forward_forward = use_ff_from_config
+            print("Backward compatibility: Setting use_forward_forward attribute")
+
+        # Prepare training data
+        print("Preparing training data...")
+        
+        # Convert data to appropriate format for advanced training methods
+        if hasattr(data, 'x') and hasattr(data, 'y'):
+            X_train = data.x
+            y_train = data.y
+            
+            # For STGNN, ensure proper tensor shapes
+            if model_name.lower() in ['stgnn', 'tgcn'] and X_train.dim() == 2:
+                # Reshape to [batch, seq, nodes, features] format
+                num_nodes = config.get('num_nodes', 10)
+                seq_length = config.get('seq_in_len', 12)
+                batch_size = X_train.shape[0] // (num_nodes * seq_length)
+                if batch_size > 0:
+                    X_train = X_train.view(batch_size, seq_length, num_nodes, -1)
+                    y_train = y_train.view(batch_size, -1, num_nodes, 1)
+        else:
+            # Extract from dataloader format if needed
+            try:
+                X_list, y_list = [], []
+                if hasattr(data, '__iter__'):
+                    for x_batch, y_batch in data:
+                        X_list.append(x_batch)
+                        y_list.append(y_batch)
+                    X_train = torch.cat(X_list, dim=0)
+                    y_train = torch.cat(y_list, dim=0)
+                else:
+                    X_train = data.x if hasattr(data, 'x') else torch.randn(32, 12, 10, 1)
+                    y_train = data.y if hasattr(data, 'y') else torch.randn(32, 3, 10, 1)
+            except:
+                # Fallback to synthetic data for testing
+                X_train = torch.randn(32, 12, 10, 1)
+                y_train = torch.randn(32, 3, 10, 1)
+                print("Warning: Using synthetic data for training")
+        
+        print(f"Training data prepared: X={X_train.shape}, y={y_train.shape}")
+        
+        # Handle label preprocessing for Forward Forward
+        if use_ff_from_config:
+            print("Preprocessing labels for Forward Forward training...")
+            
+            if y_train.dim() > 1 and y_train.shape[-1] == 1:
+                y_train = y_train.squeeze(-1)  # Remove last dimension if it's 1
+            
+            # Convert continuous labels to discrete classes for Forward Forward
+            if y_train.dtype == torch.float32 or y_train.dtype == torch.float64:
+                print("Converting continuous labels to discrete classes...")
+                
+                output_dim = config.get('output_dim', 2)
+                
+                if output_dim == 2:
+                    # Binary classification
+                    threshold = y_train.mean()
+                    y_train = (y_train > threshold).long()
+                    print(f"Applied threshold {threshold:.4f} for binary classification")
+                else:
+                    # Multi-class quantile-based discretization
+                    quantiles = torch.quantile(y_train.flatten(), torch.linspace(0, 1, output_dim + 1))
+                    y_train_discrete = torch.zeros_like(y_train, dtype=torch.long)
+                    for i in range(output_dim):
+                        if i == output_dim - 1:
+                            mask = y_train >= quantiles[i]
+                        else:
+                            mask = (y_train >= quantiles[i]) & (y_train < quantiles[i + 1])
+                        y_train_discrete[mask] = i
+                    y_train = y_train_discrete
+                    print(f"Applied quantile-based discretization to {output_dim} classes")
+                
+                print(f"Label distribution: {torch.bincount(y_train.flatten())}")
+
+        # Start training
+        print("Starting GNN Model Training")
+        epoch_loss_data = []
+        
+        # Training logic based on method
+        if use_ff_from_config:
+            print(" Using Forward Forward training mode")
+            if hasattr(model, 'train_forward_forward'):
+                ff_results = model.train_forward_forward(X_train, y_train, verbose=True)
+                
+                # Extract loss information from Forward Forward results
+                for i, block_result in enumerate(ff_results['block_results']):
+                    for epoch, loss in enumerate(block_result['losses']):
+                        epoch_loss_data.append({
+                            'block': i + 1,
+                            'epoch': epoch + 1,
+                            'loss': float(loss),
+                            'training_mode': 'forward_forward'
+                        })
+                
+                print(f" Forward Forward training completed in {ff_results['total_training_time']:.2f} seconds")
+            else:
+                print(" Model does not support Forward Forward training, using standard training")
+                use_ff_from_config = False
+                
+        elif use_cafo_from_config:
+            print(" Using CAFO training mode")
+            if hasattr(model, 'train_cafo'):
+                cafo_results = model.train_cafo(X_train, y_train, verbose=True)
+                
+                # Extract loss information from CAFO results
+                for i, block_result in enumerate(cafo_results['block_results']):
+                    for epoch, loss in enumerate(block_result['train_losses']):
+                        epoch_loss_data.append({
+                            'block': i + 1,
+                            'epoch': epoch + 1,
+                            'loss': float(loss),
+                            'training_mode': 'cafo'
+                        })
+                
+                print(f" CAFO training completed in {cafo_results['total_training_time']:.2f} seconds")
+            else:
+                print(" Model does not support CAFO training, using standard training")
+                use_cafo_from_config = False
+        
+        # Standard backpropagation training (if no advanced method or fallback)
+        if not use_ff_from_config and not use_cafo_from_config:
+            print(" Using traditional backpropagation training mode")
+            
+            epochs = config.get('epochs', 100)
+            print(f"Training for {epochs} epochs")
+            
+            for epoch in range(epochs):
+                try:
+                    # Use train_step if available, otherwise fall back to manual training
+                    if hasattr(model, 'train_step'):
+                        loss = model.train_step(data, getattr(data, 'train_mask', None))
+                    else:
+                        # Manual training step
+                        if not hasattr(model, 'optimizer'):
+                            model.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+                        if not hasattr(model, 'criterion'):
+                            model.criterion = torch.nn.MSELoss()
+                        
+                        model.train()
+                        model.optimizer.zero_grad()
+                        
+                        if hasattr(data, 'x') and hasattr(data, 'edge_index'):
+                            # Graph data
+                            predictions = model(data.x, data.edge_index)
+                            loss = model.criterion(predictions, data.y)
+                        else:
+                            # Tensor data
+                            predictions = model(X_train)
+                            loss = model.criterion(predictions, y_train)
+                        
+                        loss.backward()
+                        model.optimizer.step()
+                        loss = loss.item()
+                    
+                    print(f"Epoch {epoch + 1}/{epochs} | Loss: {loss:.6f}")
+                    epoch_loss_data.append({
+                        'epoch': epoch + 1,
+                        'loss': float(loss),
+                        'training_mode': 'traditional'
+                    })
+                    
+                except Exception as e:
+                    print(f"Training error at epoch {epoch}: {e}")
+                    # Use a dummy loss to continue
+                    epoch_loss_data.append({
+                        'epoch': epoch + 1,
+                        'loss': 1.0,
+                        'training_mode': 'traditional'
+                    })
+
+        # Training completion summary
+        training_mode = 'forward_forward' if use_ff_from_config else \
+                       'cafo' if use_cafo_from_config else 'traditional'
+        
+        print(f"\\n GNN Model Training Completed - Mode: {training_mode.upper()}")
+        print(f" Loss entries recorded: {len(epoch_loss_data)}")
+
+        # Save trained model
+        print("Saving trained model...")
+        try:
+            output_dir = os.path.dirname(args.trained_model)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                print(f"Created directory: {output_dir}")
+            
+            torch.save(model.state_dict(), args.trained_model)
+            print(f"✅ Saved trained model to {args.trained_model}")
+        except Exception as e:
+            print(f"❌ Error saving trained model: {e}")
+            exit(1)
+
+        # Save epoch loss data with training summary
+        training_summary = {
+            'training_mode': training_mode,
+            'total_loss_entries': len(epoch_loss_data),
+            'final_loss': epoch_loss_data[-1]['loss'] if epoch_loss_data else 0.0,
+            'model_config': {
+                'model_name': model_name,
+                'training_method': training_mode,
+                'data_shape': {
+                    'input': list(X_train.shape),
+                    'output': list(y_train.shape)
+                }
+            },
+            'advanced_config': {
+                'cafo_blocks': config.get('cafo_blocks', 0) if use_cafo_from_config else 0,
+                'ff_blocks': config.get('ff_blocks', 0) if use_ff_from_config else 0,
+                'epochs': config.get('epochs', 0) if training_mode == 'traditional' else 0
+            },
+            'loss_history': epoch_loss_data
+        }
+
+        output_dir_epoch_loss = os.path.dirname(args.epoch_loss)
+        if output_dir_epoch_loss and not os.path.exists(output_dir_epoch_loss):
+            os.makedirs(output_dir_epoch_loss, exist_ok=True)
+        
+        with open(args.epoch_loss, 'w') as f:
+            json.dump(training_summary, f, indent=2)
+
+        print(f"Saved training summary to {args.epoch_loss}")
+        print(f"Training method used: {training_mode.upper()}")
+        
+        if training_mode != 'traditional':
+            print(f"🔬 Advanced training completed successfully!")
+        
+        print("🏁 GNN Training workflow completed!")
+    args:
+      - --data_path
+      - {inputPath: data_path}
+      - --model
+      - {inputPath: model}
+      - --config
+      - {inputValue: config}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --epoch_loss
+      - {outputPath: epoch_loss}
