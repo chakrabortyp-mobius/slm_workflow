@@ -23,6 +23,7 @@ implementation:
     command:
       - sh
       - -c
+      # vllm install is no longer required, but harmless; you can simplify to only trl if you want.
       - (pip install --no-cache-dir trl vllm > /dev/null 2>&1) && "$0" "$@"
       - python3
       - -u
@@ -109,13 +110,15 @@ implementation:
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
             logger.info(f"Tokenizer loaded, vocab size: {len(tokenizer)}")
 
-            logger.info("Loading base model with resized embeddings...")
+            # CHANGED: force CPU + float32 to avoid bf16/GPU requirement
+            logger.info("Loading base model with resized embeddings on CPU (float32)...")
             model = AutoModelForCausalLM.from_pretrained(
                 base_model_path,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
+                torch_dtype=torch.float32,
+                device_map=None,
                 trust_remote_code=True
             )
+            model.to("cpu")
             logger.info("Base model loaded successfully")
 
             # -------------------------
@@ -191,7 +194,7 @@ implementation:
                 return scores
 
             # -------------------------
-            # GRPO config (no vLLM)
+            # GRPO config (no vLLM, CPU-friendly)
             # -------------------------
             # Choose a prompt/completion split that is always positive
             max_prompt_length = max_seq_length_val // 2
@@ -205,6 +208,7 @@ implementation:
             logger.info(f"Effective batch size: {batch_size_val * grad_accum_steps_val}")
             logger.info("=" * 60)
 
+            # CHANGED: explicitly disable bf16/fp16 so TrainingArguments does not require GPU
             training_args = GRPOConfig(
                 learning_rate=learning_rate_val,
                 adam_beta1=0.9,
@@ -225,6 +229,10 @@ implementation:
                 report_to="none",
                 output_dir="outputs",
                 temperature=temperature_val,
+                bf16=False,
+                fp16=False,
+                bf16_full_eval=False,
+                fp16_full_eval=False,
             )
 
             # -------------------------
