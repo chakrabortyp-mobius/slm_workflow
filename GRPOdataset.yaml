@@ -123,8 +123,17 @@ implementation:
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
 
+            records = []
+            for ex in processed:
+                records.append({
+                    "prompt": ex["prompt"],
+                    "answer": ex["answer"],
+                })
+            
             with open(args.grpo_dataset, "wb") as f:
-                pickle.dump(processed, f)
+                pickle.dump(records, f)
+
+
 
             print("\\n==========================================")
             print("SUCCESS!")
