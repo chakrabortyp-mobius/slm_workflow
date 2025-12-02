@@ -32,6 +32,7 @@ implementation:
             import os
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             return file_path
+
         def train_grpo(
             base_model_path,
             lora_adapters_path,
@@ -55,10 +56,11 @@ implementation:
             from transformers import AutoTokenizer, AutoModelForCausalLM
             from peft import PeftModel
             from trl import GRPOConfig, GRPOTrainer
-            from vllm import SamplingParams
             import logging
+
             logging.basicConfig(level=logging.INFO)
             logger = logging.getLogger("grpo_training")
+
             def check_gpu():
                 if torch.cuda.is_available():
                     logger.info("=" * 60)
@@ -69,7 +71,9 @@ implementation:
                     logger.info("=" * 60)
                 else:
                     logger.warning("WARNING: No GPU available")
+
             check_gpu()
+
             logger.info("=" * 60)
             logger.info("GRPO Training (Continuing from SFT)")
             logger.info(f"Base Model: {base_model_path}")
@@ -80,20 +84,31 @@ implementation:
             logger.info(f"Training Steps: {num_train_steps_val}")
             logger.info(f"Num Generations: {num_generations_val}")
             logger.info("=" * 60)
+
+            # -------------------------
+            # Load dataset (plain list)
+            # -------------------------
             logger.info("Loading dataset from pickle...")
             with open(grpo_dataset_path, 'rb') as f:
-                dataset_dict = pickle.load(f)
-            if hasattr(dataset_dict, 'keys') and 'train' in dataset_dict:
-                dataset = dataset_dict['train']
+                dataset_obj = pickle.load(f)
+
+            if hasattr(dataset_obj, 'keys') and 'train' in dataset_obj:
+                dataset = dataset_obj['train']
             else:
-                dataset = dataset_dict
+                dataset = dataset_obj
+
             logger.info(f"Dataset loaded: {len(dataset)} examples")
             if len(dataset) > 0:
                 logger.info(f"Sample prompt: {dataset[0]['prompt']}")
                 logger.info(f"Sample answer: {dataset[0]['answer'][:100]}...")
+
+            # -------------------------
+            # Tokenizer & base model
+            # -------------------------
             logger.info("Loading tokenizer from SFT training...")
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
             logger.info(f"Tokenizer loaded, vocab size: {len(tokenizer)}")
+
             logger.info("Loading base model with resized embeddings...")
             model = AutoModelForCausalLM.from_pretrained(
                 base_model_path,
@@ -102,6 +117,10 @@ implementation:
                 trust_remote_code=True
             )
             logger.info("Base model loaded successfully")
+
+            # -------------------------
+            # Load SFT LoRA adapters
+            # -------------------------
             sft_adapter_path = os.path.join(lora_adapters_path, "adapter")
             if os.path.exists(sft_adapter_path):
                 logger.info(f"Loading SFT LoRA adapters from {sft_adapter_path}")
@@ -110,7 +129,12 @@ implementation:
             else:
                 logger.error(f"ERROR: SFT adapter not found at {sft_adapter_path}")
                 raise FileNotFoundError(f"LoRA adapters not found at {sft_adapter_path}")
+
+            # -------------------------
+            # Reward functions
+            # -------------------------
             logger.info("Defining reward functions...")
+
             def format_reward_func(completions, **kwargs):
                 scores = []
                 for completion in completions:
@@ -126,6 +150,7 @@ implementation:
                         score += 0.25
                     scores.append(score)
                 return scores
+
             def json_validity_reward_func(completions, **kwargs):
                 scores = []
                 for completion in completions:
@@ -136,12 +161,14 @@ implementation:
                         if match:
                             json.loads(match.group(1).strip())
                             score += 1.0
-                    except:
+                    except Exception:
                         score -= 0.5
                     scores.append(score)
                 return scores
+
             global PRINT_COUNTER
             PRINT_COUNTER = 0
+
             def answer_similarity_reward_func(prompts, completions, answer, **kwargs):
                 global PRINT_COUNTER
                 if PRINT_COUNTER % 5 == 0:
@@ -153,6 +180,7 @@ implementation:
                     logger.info(f"Response: {response[:200]}...")
                     logger.info("-" * 60)
                 PRINT_COUNTER += 1
+
                 scores = []
                 for completion, true_answer in zip(completions, answer):
                     response = completion[0]["content"]
@@ -161,23 +189,23 @@ implementation:
                     else:
                         scores.append(0.0)
                 return scores
-            max_prompt_length = 512
+
+            # -------------------------
+            # GRPO config (no vLLM)
+            # -------------------------
+            # Choose a prompt/completion split that is always positive
+            max_prompt_length = max_seq_length_val // 2
+            max_prompt_length = min(512, max_prompt_length)
+            max_completion_length = max_seq_length_val - max_prompt_length
+
             logger.info("=" * 60)
             logger.info("GRPO Training Configuration:")
             logger.info(f"Max prompt length: {max_prompt_length}")
-            logger.info(f"Max completion length: {max_seq_length_val - max_prompt_length}")
+            logger.info(f"Max completion length: {max_completion_length}")
             logger.info(f"Effective batch size: {batch_size_val * grad_accum_steps_val}")
             logger.info("=" * 60)
-            vllm_sampling_params = SamplingParams(
-                min_p=0.1,
-                top_p=1.0,
-                top_k=-1,
-                seed=3407,
-                stop=[tokenizer.eos_token],
-                include_stop_str_in_output=True,
-            )
+
             training_args = GRPOConfig(
-                vllm_sampling_params=vllm_sampling_params,
                 learning_rate=learning_rate_val,
                 adam_beta1=0.9,
                 adam_beta2=0.99,
@@ -190,7 +218,7 @@ implementation:
                 gradient_accumulation_steps=grad_accum_steps_val,
                 num_generations=num_generations_val,
                 max_prompt_length=max_prompt_length,
-                max_completion_length=max_seq_length_val - max_prompt_length,
+                max_completion_length=max_completion_length,
                 max_steps=num_train_steps_val,
                 save_steps=num_train_steps_val,
                 max_grad_norm=0.1,
@@ -198,6 +226,10 @@ implementation:
                 output_dir="outputs",
                 temperature=temperature_val,
             )
+
+            # -------------------------
+            # Trainer and training
+            # -------------------------
             logger.info("Initializing GRPO Trainer...")
             trainer = GRPOTrainer(
                 model=model,
@@ -206,15 +238,23 @@ implementation:
                 args=training_args,
                 train_dataset=dataset,
             )
+
             logger.info("Starting GRPO training...")
             trainer.train()
+
+            # -------------------------
+            # Save adapters & tokenizer
+            # -------------------------
             os.makedirs(grpo_model_path, exist_ok=True)
             adapter_save_path = os.path.join(grpo_model_path, "adapter")
             os.makedirs(adapter_save_path, exist_ok=True)
+
             logger.info(f"Saving GRPO-trained LoRA adapters to {adapter_save_path}")
             model.save_pretrained(adapter_save_path)
+
             logger.info(f"Saving tokenizer to {grpo_model_path}")
             tokenizer.save_pretrained(grpo_model_path)
+
             training_info = {
                 "base_model": base_model_path,
                 "training_steps": num_train_steps_val,
@@ -222,15 +262,18 @@ implementation:
                 "num_generations": num_generations_val,
                 "final_dataset_size": len(dataset),
                 "max_prompt_length": max_prompt_length,
-                "max_completion_length": max_seq_length_val - max_prompt_length,
+                "max_completion_length": max_completion_length,
             }
+
             with open(os.path.join(grpo_model_path, "grpo_info.json"), "w") as f:
                 json.dump(training_info, f, indent=2)
+
             logger.info("=" * 60)
             logger.info("GRPO training complete!")
             logger.info(f"LoRA adapters saved to: {adapter_save_path}")
             logger.info(f"Tokenizer saved to: {grpo_model_path}")
             logger.info("=" * 60)
+
         import argparse
         _parser = argparse.ArgumentParser(prog="GRPO Training", description="GRPO training for LoRA models")
         _parser.add_argument("--base_model_path", type=str, required=True)
