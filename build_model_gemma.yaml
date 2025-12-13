@@ -20,7 +20,7 @@ outputs:
     type: String
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: gurpreetgandhi/nesy-factory:v37-gpu
     command:
       - python3
       - -u
