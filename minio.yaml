@@ -37,7 +37,7 @@ implementation:
       mv mc /usr/local/bin/
       
       # Set up MinIO alias
-      mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 minio K7712XV0U4HRXJOCL8JJFPBVUNFNZL
+      mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 minio HN1YBS5WHS40M1CJ75FNKH0HEHR42I
       
       # Read inputs
       WEIGHTS="$0"
