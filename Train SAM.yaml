@@ -1,6 +1,5 @@
 name: Train SAM
 description: Fine-tunes a Gemma3 model using LoRA on a dataset with ChatML formatting.
-
 inputs:
   - name: tokenizer_dir
     type: Model
@@ -37,13 +36,13 @@ inputs:
   - name: sliding_window
     type: Integer
     default: "2048"
-
 outputs:
   - name: trained_model
     type: Model
   - name: training_report
     type: Data
-
+  - name: training_metrics_json
+    type: String
 implementation:
   container:
     image: nikhilv215/nesy-factory:v22
@@ -85,12 +84,10 @@ implementation:
                 old_out = self.out_head
                 d = old_emb.embedding_dim
                 device, dtype = old_emb.weight.device, old_emb.weight.dtype
-
                 new_emb = nn.Embedding(new_size, d, device=device, dtype=dtype)
                 num_copy = min(old_emb.num_embeddings, new_size)
                 new_emb.weight.data[:num_copy] = old_emb.weight.data[:num_copy]
                 self.token_emb = new_emb
-
                 new_out = nn.Linear(d, new_size, bias=False, device=device, dtype=dtype)
                 new_out.weight.data[:num_copy] = old_out.weight.data[:num_copy]
                 self.out_head = new_out
@@ -108,31 +105,29 @@ implementation:
         class Gemma3ForCausalLM(PreTrainedModel):
             config_class = Gemma3Config
             base_model_prefix = "gemma3"
-
+            
             def __init__(self, config: Gemma3Config):
                 super().__init__(config)
                 self.model = None
-
+            
             @classmethod
             def from_pretrained(cls, cfg_path, model_py_path, weights_path, device):
                 cfg_dict = json.load(open(cfg_path))
                 cfg_dict["dtype"] = torch.float16 if str(cfg_dict.get("dtype")) == "float16" else torch.float32
                 config = Gemma3Config(**cfg_dict)
-
                 ModelClass = _load_model_class_from_file(model_py_path, "Gemma3Model")
                 _patch_resize_token_embeddings(ModelClass)
                 model = ModelClass(cfg_dict).to(device)
                 state = torch.load(weights_path, map_location=device)
                 model.load_state_dict(state, strict=True)
-
                 wrapper = cls(config)
                 wrapper.model = model
                 return wrapper
-
+            
             def forward(self, input_ids=None, labels=None, **kwargs):
                 logits, loss = self.model(input_ids=input_ids, labels=labels)
                 return CausalLMOutputWithPast(loss=loss, logits=logits)
-
+            
             def resize_token_embeddings(self, new_size):
                 return self.model.resize_token_embeddings(new_size)
             
@@ -168,6 +163,7 @@ implementation:
             ap.add_argument("--sliding-window", type=int, required=True)
             ap.add_argument("--trained-model", required=True)
             ap.add_argument("--training-report", required=True)
+            ap.add_argument("--training-metrics-json", required=True)
             a = ap.parse_args()
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -176,7 +172,7 @@ implementation:
             # Load tokenizer
             print(f"[INFO] Loading tokenizer from {a.tokenizer_dir}")
             tok = PreTrainedTokenizerFast.from_pretrained(a.tokenizer_dir)
-            
+
             # Set chat template
             tok.chat_template = (
                 "{{ bos_token }}"
@@ -206,11 +202,10 @@ implementation:
             dataset = dataset.rename_column("conversations", "messages")
             dataset = dataset.map(preprocess, remove_columns="messages")
             dataset = dataset["train"].train_test_split(0.1)
-            
+
             # Select subset of data
             dataset["train"] = dataset["train"].select(range(100))
             dataset["test"] = dataset["test"].select(range(10))
-            
             print(f"[INFO] Dataset prepared - train: {len(dataset['train'])}, test: {len(dataset['test'])}")
 
             # Load model
@@ -231,7 +226,6 @@ implementation:
             print(f"[INFO] Original vocab size: {model.model.token_emb.num_embeddings}")
             model.resize_token_embeddings(len(tok))
             print(f"[INFO] New vocab size: {model.model.token_emb.num_embeddings}")
-
             model.model.to(torch.float32)
 
             # LoRA configuration
@@ -285,6 +279,50 @@ implementation:
             print(f"[INFO] Starting training for {a.num_train_epochs} epochs")
             trainer.train()
 
+            # Extract training metrics from trainer logs
+            print(f"[INFO] Extracting training metrics")
+            schema_list = []
+
+            if hasattr(trainer.state, 'log_history'):
+                # Group metrics by epoch
+                epoch_metrics = {}
+                
+                for entry in trainer.state.log_history:
+                    epoch = entry.get('epoch')
+                    if epoch is None:
+                        continue
+                    
+                    epoch_int = int(epoch) if epoch == int(epoch) else int(epoch) + 1
+                    
+                    if epoch_int not in epoch_metrics:
+                        epoch_metrics[epoch_int] = {
+                            "epoch": epoch_int,
+                            "loss": 0.0,
+                            "validation_loss": 0.0
+                        }
+                    
+                    # Update training loss
+                    if 'loss' in entry:
+                        epoch_metrics[epoch_int]['loss'] = float(entry['loss'])
+                    
+                    # Update validation loss
+                    if 'eval_loss' in entry:
+                        epoch_metrics[epoch_int]['validation_loss'] = float(entry['eval_loss'])
+                
+                # Convert to list sorted by epoch
+                schema_list = [epoch_metrics[e] for e in sorted(epoch_metrics.keys())]
+
+            # Save schema JSON
+            metrics_json_path = a.training_metrics_json
+            if os.path.isdir(metrics_json_path):
+                metrics_json_path = os.path.join(metrics_json_path, "metrics.json")
+
+            os.makedirs(os.path.dirname(metrics_json_path) or ".", exist_ok=True)
+            with open(metrics_json_path, "w", encoding="utf-8") as f:
+                json.dump(schema_list, f, indent=2)
+
+            print(f"[SUCCESS] Training metrics saved to {metrics_json_path} ({len(schema_list)} entries)")
+
             # Save model
             os.makedirs(a.trained_model, exist_ok=True)
             trainer.model.save_pretrained(a.trained_model)
@@ -312,17 +350,14 @@ implementation:
                 "device": device,
                 "output_dir": a.trained_model
             }
-            
             os.makedirs(os.path.dirname(a.training_report) or ".", exist_ok=True)
             with open(a.training_report, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
-            
             print(f"[SUCCESS] Training report saved to {a.training_report}")
 
         if __name__ == "__main__":
             main()
         PY
-
         python3 -u /tmp/train_lora.py "$0" "$@"
     args:
       - --tokenizer-dir
@@ -355,3 +390,5 @@ implementation:
       - {outputPath: trained_model}
       - --training-report
       - {outputPath: training_report}
+      - --training-metrics-json
+      - {outputPath: training_metrics_json}
