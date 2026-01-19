@@ -209,39 +209,39 @@ implementation:
             
             # Create README
             readme_content = f"""---
-language: en
-license: apache-2.0
-tags:
-- gemma3
-- custom
-- transformer
----
+                    language: en
+                    license: apache-2.0
+                    tags:
+                    - gemma3
+                    - custom
+                    - transformer
+                    ---
 
-# {model_name}
+        # {model_name}
 
-This is a custom Gemma3 model trained using a custom pipeline.
+        This is a custom Gemma3 model trained using a custom pipeline.
 
-## Model Details
+        ## Model Details
 
-- **Architecture**: Gemma3 (custom implementation)
-- **Layers**: {model_config['n_layers']}
-- **Hidden Size**: {model_config['emb_dim']}
-- **Attention Heads**: {model_config['n_heads']}
-- **Vocab Size**: {vocab_size}
-- **Context Length**: {model_config['context_length']}
-- **Layer Types**: {', '.join(model_config.get('layer_types', []))}
+        - **Architecture**: Gemma3 (custom implementation)
+        - **Layers**: {model_config['n_layers']}
+        - **Hidden Size**: {model_config['emb_dim']}
+        - **Attention Heads**: {model_config['n_heads']}
+        - **Vocab Size**: {vocab_size}
+        - **Context Length**: {model_config['context_length']}
+        - **Layer Types**: {', '.join(model_config.get('layer_types', []))}
 
-## Usage
+        ## Usage
 
-This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
+        This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
 
-## Files
+        ## Files
 
-- `config.json`: Model configuration
-- `pytorch_model.bin`: Model weights
-- `tokenizer.json`: Tokenizer
-- `modeling_gemma3.py`: Model architecture
-"""
+        - `config.json`: Model configuration
+        - `pytorch_model.bin`: Model weights
+        - `tokenizer.json`: Tokenizer
+        - `modeling_gemma3.py`: Model architecture
+        """
             
             with open(os.path.join(output_dir, "README.md"), 'w') as f:
                 f.write(readme_content)
