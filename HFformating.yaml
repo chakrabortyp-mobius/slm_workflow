@@ -207,41 +207,51 @@ implementation:
             shutil.copy(model_py_path, os.path.join(output_dir, "modeling_gemma3.py"))
             print("Copied modeling_gemma3.py")
             
-            # Create README
-            readme_content = f"""---
-                    language: en
-                    license: apache-2.0
-                    tags:
-                    - gemma3
-                    - custom
-                    - transformer
-                    ---
 
-        # {model_name}
+          README_TEMPLATE = r'''---
+              language: en
+              license: apache-2.0
+              tags:
+              - gemma3
+              - custom
+              - transformer
+              ---
+              
+              # {model_name}
+              
+              This is a custom Gemma3 model trained using a custom pipeline.
+              
+              ## Model Details
+              
+              - **Architecture**: Gemma3 (custom implementation)
+              - **Layers**: {n_layers}
+              - **Hidden Size**: {emb_dim}
+              - **Attention Heads**: {n_heads}
+              - **Vocab Size**: {vocab_size}
+              - **Context Length**: {context_length}
+              - **Layer Types**: {layer_types}
+              
+              ## Usage
+              
+              This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
+              
+              ## Files
+              
+              - `config.json`: Model configuration
+              - `pytorch_model.bin`: Model weights
+              - `tokenizer.json`: Tokenizer
+              - `modeling_gemma3.py`: Model architecture
+              '''
 
-        This is a custom Gemma3 model trained using a custom pipeline.
-
-        ## Model Details
-
-        - **Architecture**: Gemma3 (custom implementation)
-        - **Layers**: {model_config['n_layers']}
-        - **Hidden Size**: {model_config['emb_dim']}
-        - **Attention Heads**: {model_config['n_heads']}
-        - **Vocab Size**: {vocab_size}
-        - **Context Length**: {model_config['context_length']}
-        - **Layer Types**: {', '.join(model_config.get('layer_types', []))}
-
-        ## Usage
-
-        This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
-
-        ## Files
-
-        - `config.json`: Model configuration
-        - `pytorch_model.bin`: Model weights
-        - `tokenizer.json`: Tokenizer
-        - `modeling_gemma3.py`: Model architecture
-        """
+          readme_content = README_TEMPLATE.format(
+                model_name=model_name,
+                n_layers=n_layers,
+                emb_dim=emb_dim,
+                n_heads=n_heads,
+                vocab_size=vocab_str,
+                context_length=ctx_len,
+                layer_types=layer_types_str
+            )
             
             with open(os.path.join(output_dir, "README.md"), 'w') as f:
                 f.write(readme_content)
