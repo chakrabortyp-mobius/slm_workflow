@@ -1,1 +1,304 @@
+name: Convert Gemma3 to HuggingFace Format
+description: Converts trained Gemma3 model to HuggingFace format with proper config.json, tokenizer files, and PyTorch model weights compatible with HF transformers library.
 
+inputs:
+  - name: model_weights
+    type: Model
+    description: Trained model weights (.pth file)
+  - name: tokenizer_json
+    type: Model
+    description: Tokenizer JSON file from training
+  - name: model_config
+    type: Data
+    description: Model configuration JSON
+  - name: model_py
+    type: Data
+    description: Model Python source code
+  - name: model_name
+    type: String
+    description: Name for the HuggingFace model
+
+outputs:
+  - name: hf_model
+    type: Model
+    description: HuggingFace format model directory
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v37-gpu
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import os
+        import json
+        import argparse
+        import shutil
+        import torch
+        import importlib.util
+        from tokenizers import Tokenizer
+        
+        def load_model_class(py_path, class_name="Gemma3Model"):
+            if os.path.isdir(py_path):
+                py_files = [f for f in os.listdir(py_path) if f.endswith('.py')]
+                if not py_files:
+                    raise FileNotFoundError(f"No .py file found in {py_path}")
+                py_path = os.path.join(py_path, py_files[0])
+            if not py_path.endswith('.py'):
+                temp_path = py_path + '.py'
+                shutil.copyfile(py_path, temp_path)
+                py_path = temp_path
+            
+            spec = importlib.util.spec_from_file_location("gemma3_model", py_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec from {py_path}")
+            
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            
+            if not hasattr(mod, class_name):
+                raise AttributeError(f"{py_path} does not define {class_name}")
+            
+            return getattr(mod, class_name)
+        
+        def create_hf_config(model_config, tokenizer_vocab_size):
+            return {
+                "architectures": ["Gemma3Model"],
+                "model_type": "gemma3",
+                "vocab_size": tokenizer_vocab_size,
+                "hidden_size": model_config["emb_dim"],
+                "intermediate_size": model_config["hidden_dim"],
+                "num_hidden_layers": model_config["n_layers"],
+                "num_attention_heads": model_config["n_heads"],
+                "num_key_value_heads": model_config.get("n_kv_groups", 1),
+                "head_dim": model_config["head_dim"],
+                "max_position_embeddings": model_config["context_length"],
+                "rms_norm_eps": model_config.get("rms_norm_eps", 1e-6),
+                "rope_theta": model_config["rope_base"],
+                "rope_local_theta": model_config["rope_local_base"],
+                "sliding_window": model_config["sliding_window"],
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "hidden_activation": "gelu",
+                "initializer_range": model_config.get("initializer_range", 0.02),
+                "layer_types": model_config.get("layer_types", []),
+                "qk_norm": model_config.get("qk_norm", False),
+                "query_pre_attn_scalar": model_config.get("query_pre_attn_scalar"),
+                "torch_dtype": model_config.get("dtype", "float32"),
+                "transformers_version": "4.0.0",
+                "use_cache": True,
+                "bos_token_id": 2,
+                "eos_token_id": 3,
+                "pad_token_id": 0,
+            }
+        
+        def create_tokenizer_config(special_tokens):
+            return {
+                "add_bos_token": True,
+                "add_eos_token": True,
+                "bos_token": "[BOS]",
+                "eos_token": "[EOS]",
+                "unk_token": "[UNK]",
+                "pad_token": "[PAD]",
+                "model_max_length": 2048,
+                "tokenizer_class": "PreTrainedTokenizerFast",
+                "special_tokens_map_file": None,
+                "name_or_path": "gemma3-custom",
+            }
+        
+        def create_special_tokens_map():
+            return {
+                "bos_token": "[BOS]",
+                "eos_token": "[EOS]",
+                "unk_token": "[UNK]",
+                "pad_token": "[PAD]"
+            }
+        
+        def convert_to_hf_format(
+            model_weights_path,
+            tokenizer_json_path,
+            model_config_path,
+            model_py_path,
+            model_name,
+            output_dir
+        ):
+            print("==========================")
+            print("Converting Gemma3 Model to HuggingFace Format")
+            print("============================")
+            
+
+            os.makedirs(output_dir, exist_ok=True)
+            print("[1/7] Loading model configuration...")
+            with open(model_config_path, 'r') as f:
+                model_config = json.load(f)
+            print(f"Loaded config with {model_config['n_layers']} layers")
+            
+            # Load tokenizer
+            print("[2/7] Loading tokenizer...")
+            # Handle both file and directory paths for tokenizer
+            if os.path.isdir(tokenizer_json_path):
+                json_files = [f for f in os.listdir(tokenizer_json_path) if f.endswith('.json')]
+                if json_files:
+                    tokenizer_json_path = os.path.join(tokenizer_json_path, json_files[0])
+            
+            tokenizer = Tokenizer.from_file(tokenizer_json_path)
+            vocab_size = tokenizer.get_vocab_size()
+            print(f"Loaded tokenizer with vocab size: {vocab_size}")
+            
+            # Copy tokenizer.json
+            print("[3/7] Copying tokenizer files...")
+            shutil.copy(tokenizer_json_path, os.path.join(output_dir, "tokenizer.json"))
+            print("Copied tokenizer.json")
+            
+            # Create HuggingFace config
+            print("[4/7] Creating HuggingFace config.json...")
+            hf_config = create_hf_config(model_config, vocab_size)
+            with open(os.path.join(output_dir, "config.json"), 'w') as f:
+                json.dump(hf_config, f, indent=2)
+            print("Created config.json")
+            
+            # Create tokenizer_config.json
+            print("[5/7] Creating tokenizer_config.json...")
+            tokenizer_config = create_tokenizer_config(["[PAD]", "[UNK]", "[BOS]", "[EOS]"])
+            with open(os.path.join(output_dir, "tokenizer_config.json"), 'w') as f:
+                json.dump(tokenizer_config, f, indent=2)
+            print("Created tokenizer_config.json")
+            
+            # Create special_tokens_map.json
+            special_tokens_map = create_special_tokens_map()
+            with open(os.path.join(output_dir, "special_tokens_map.json"), 'w') as f:
+                json.dump(special_tokens_map, f, indent=2)
+            print("Created special_tokens_map.json")
+            
+            # Load and save model weights in HuggingFace format
+            print("[6/7] Converting model weights...")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            # Load the model class
+            Gemma3Model = load_model_class(model_py_path, "Gemma3Model")
+            
+            # Adjust dtype in config for model initialization
+            dtype_str = str(model_config.get("dtype", "float32"))
+            if dtype_str == "float16":
+                model_config["dtype"] = torch.float16
+            else:
+                model_config["dtype"] = torch.float32
+            
+            # Initialize model
+            model = Gemma3Model(model_config)
+            
+            # Load weights
+            state_dict = torch.load(model_weights_path, map_location=device)
+            model.load_state_dict(state_dict, strict=True)
+            
+            # Save in HuggingFace format (pytorch_model.bin)
+            torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
+            print(f"Saved pytorch_model.bin ({os.path.getsize(os.path.join(output_dir, 'pytorch_model.bin')) / 1e6:.2f} MB)")
+            
+            # Copy model Python file
+            print("[7/7] Copying model source code...")
+            # Handle both file and directory paths
+            if os.path.isdir(model_py_path):
+                py_files = [f for f in os.listdir(model_py_path) if f.endswith('.py')]
+                if py_files:
+                    model_py_path = os.path.join(model_py_path, py_files[0])
+            
+            shutil.copy(model_py_path, os.path.join(output_dir, "modeling_gemma3.py"))
+            print("Copied modeling_gemma3.py")
+            
+            # Create README
+            readme_content = f"""---
+language: en
+license: apache-2.0
+tags:
+- gemma3
+- custom
+- transformer
+---
+
+# {model_name}
+
+This is a custom Gemma3 model trained using a custom pipeline.
+
+## Model Details
+
+- **Architecture**: Gemma3 (custom implementation)
+- **Layers**: {model_config['n_layers']}
+- **Hidden Size**: {model_config['emb_dim']}
+- **Attention Heads**: {model_config['n_heads']}
+- **Vocab Size**: {vocab_size}
+- **Context Length**: {model_config['context_length']}
+- **Layer Types**: {', '.join(model_config.get('layer_types', []))}
+
+## Usage
+
+This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
+
+## Files
+
+- `config.json`: Model configuration
+- `pytorch_model.bin`: Model weights
+- `tokenizer.json`: Tokenizer
+- `modeling_gemma3.py`: Model architecture
+"""
+            
+            with open(os.path.join(output_dir, "README.md"), 'w') as f:
+                f.write(readme_content)
+            
+            print("===========================================================")
+            print("Conversion Complete!")
+            print("======================================================")
+            print(f"HuggingFace model saved to: {output_dir}")
+            print(f"Model name: {model_name}")
+            print(f"Vocab size: {vocab_size}")
+            print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+            print("============================================================")
+            print("Files created:")
+            for file in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, file)
+                if os.path.isfile(file_path):
+                    size_mb = os.path.getsize(file_path) / 1e6
+                    print(f"{file} ({size_mb:.2f} MB)")
+            print("======================================")
+            print("\\n You can now:")
+            print("  1. Upload this directory to HuggingFace Hub")
+            print("  2. Use it as input to GGUF conversion (requires local path support)")
+            print("  3. Load it with: Gemma3Model.from_pretrained(output_dir)")
+            print("===============================")
+        
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--model-weights", required=True)
+            parser.add_argument("--tokenizer-json", required=True)
+            parser.add_argument("--model-config", required=True)
+            parser.add_argument("--model-py", required=True)
+            parser.add_argument("--model-name", required=True)
+            parser.add_argument("--hf-model", required=True)
+            args = parser.parse_args()
+            
+            convert_to_hf_format(
+                model_weights_path=args.model_weights,
+                tokenizer_json_path=args.tokenizer_json,
+                model_config_path=args.model_config,
+                model_py_path=args.model_py,
+                model_name=args.model_name,
+                output_dir=args.hf_model
+            )
+        
+        if __name__ == "__main__":
+            main()
+    
+    args:
+      - --model-weights
+      - {inputPath: model_weights}
+      - --tokenizer-json
+      - {inputPath: tokenizer_json}
+      - --model-config
+      - {inputPath: model_config}
+      - --model-py
+      - {inputPath: model_py}
+      - --model-name
+      - {inputValue: model_name}
+      - --hf-model
+      - {outputPath: hf_model}
