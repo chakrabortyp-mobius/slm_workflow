@@ -3,16 +3,16 @@ description: Converts trained Gemma3 model to HuggingFace format with proper con
 
 inputs:
   - name: model_weights
-    type: Model
+    type: String
     description: Trained model weights (.pth file)
   - name: tokenizer_json
-    type: Model
+    type: String
     description: Tokenizer JSON file from training
   - name: model_config
-    type: Data
+    type: String
     description: Model configuration JSON
   - name: model_py
-    type: Data
+    type: String
     description: Model Python source code
   - name: model_name
     type: String
