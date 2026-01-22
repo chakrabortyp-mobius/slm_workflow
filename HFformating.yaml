@@ -127,16 +127,13 @@ implementation:
             print("Converting Gemma3 Model to HuggingFace Format")
             print("============================")
             
-
             os.makedirs(output_dir, exist_ok=True)
             print("[1/7] Loading model configuration...")
             with open(model_config_path, 'r') as f:
                 model_config = json.load(f)
             print(f"Loaded config with {model_config['n_layers']} layers")
             
-            # Load tokenizer
             print("[2/7] Loading tokenizer...")
-            # Handle both file and directory paths for tokenizer
             if os.path.isdir(tokenizer_json_path):
                 json_files = [f for f in os.listdir(tokenizer_json_path) if f.endswith('.json')]
                 if json_files:
@@ -146,59 +143,47 @@ implementation:
             vocab_size = tokenizer.get_vocab_size()
             print(f"Loaded tokenizer with vocab size: {vocab_size}")
             
-            # Copy tokenizer.json
             print("[3/7] Copying tokenizer files...")
             shutil.copy(tokenizer_json_path, os.path.join(output_dir, "tokenizer.json"))
             print("Copied tokenizer.json")
             
-            # Create HuggingFace config
             print("[4/7] Creating HuggingFace config.json...")
             hf_config = create_hf_config(model_config, vocab_size)
             with open(os.path.join(output_dir, "config.json"), 'w') as f:
                 json.dump(hf_config, f, indent=2)
             print("Created config.json")
             
-            # Create tokenizer_config.json
             print("[5/7] Creating tokenizer_config.json...")
             tokenizer_config = create_tokenizer_config(["[PAD]", "[UNK]", "[BOS]", "[EOS]"])
             with open(os.path.join(output_dir, "tokenizer_config.json"), 'w') as f:
                 json.dump(tokenizer_config, f, indent=2)
             print("Created tokenizer_config.json")
             
-            # Create special_tokens_map.json
             special_tokens_map = create_special_tokens_map()
             with open(os.path.join(output_dir, "special_tokens_map.json"), 'w') as f:
                 json.dump(special_tokens_map, f, indent=2)
             print("Created special_tokens_map.json")
             
-            # Load and save model weights in HuggingFace format
             print("[6/7] Converting model weights...")
             device = "cuda" if torch.cuda.is_available() else "cpu"
             
-            # Load the model class
             Gemma3Model = load_model_class(model_py_path, "Gemma3Model")
             
-            # Adjust dtype in config for model initialization
             dtype_str = str(model_config.get("dtype", "float32"))
             if dtype_str == "float16":
                 model_config["dtype"] = torch.float16
             else:
                 model_config["dtype"] = torch.float32
             
-            # Initialize model
             model = Gemma3Model(model_config)
             
-            # Load weights
             state_dict = torch.load(model_weights_path, map_location=device)
             model.load_state_dict(state_dict, strict=True)
             
-            # Save in HuggingFace format (pytorch_model.bin)
             torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
             print(f"Saved pytorch_model.bin ({os.path.getsize(os.path.join(output_dir, 'pytorch_model.bin')) / 1e6:.2f} MB)")
             
-            # Copy model Python file
             print("[7/7] Copying model source code...")
-            # Handle both file and directory paths
             if os.path.isdir(model_py_path):
                 py_files = [f for f in os.listdir(model_py_path) if f.endswith('.py')]
                 if py_files:
@@ -207,50 +192,49 @@ implementation:
             shutil.copy(model_py_path, os.path.join(output_dir, "modeling_gemma3.py"))
             print("Copied modeling_gemma3.py")
             
-
-          README_TEMPLATE = r'''---
-              language: en
-              license: apache-2.0
-              tags:
-              - gemma3
-              - custom
-              - transformer
-              ---
-              
-              # {model_name}
-              
-              This is a custom Gemma3 model trained using a custom pipeline.
-              
-              ## Model Details
-              
-              - **Architecture**: Gemma3 (custom implementation)
-              - **Layers**: {n_layers}
-              - **Hidden Size**: {emb_dim}
-              - **Attention Heads**: {n_heads}
-              - **Vocab Size**: {vocab_size}
-              - **Context Length**: {context_length}
-              - **Layer Types**: {layer_types}
-              
-              ## Usage
-              
-              This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
-              
-              ## Files
-              
-              - `config.json`: Model configuration
-              - `pytorch_model.bin`: Model weights
-              - `tokenizer.json`: Tokenizer
-              - `modeling_gemma3.py`: Model architecture
-              '''
-
-          readme_content = README_TEMPLATE.format(
+            README_TEMPLATE = r'''---
+        language: en
+        license: apache-2.0
+        tags:
+        - gemma3
+        - custom
+        - transformer
+        ---
+        
+        # {model_name}
+        
+        This is a custom Gemma3 model trained using a custom pipeline.
+        
+        ## Model Details
+        
+        - **Architecture**: Gemma3 (custom implementation)
+        - **Layers**: {n_layers}
+        - **Hidden Size**: {emb_dim}
+        - **Attention Heads**: {n_heads}
+        - **Vocab Size**: {vocab_size}
+        - **Context Length**: {context_length}
+        - **Layer Types**: {layer_types}
+        
+        ## Usage
+        
+        This model can be loaded using the custom Gemma3Model class or converted to GGUF format for inference.
+        
+        ## Files
+        
+        - `config.json`: Model configuration
+        - `pytorch_model.bin`: Model weights
+        - `tokenizer.json`: Tokenizer
+        - `modeling_gemma3.py`: Model architecture
+        '''
+            
+            readme_content = README_TEMPLATE.format(
                 model_name=model_name,
-                n_layers=n_layers,
-                emb_dim=emb_dim,
-                n_heads=n_heads,
-                vocab_size=vocab_str,
-                context_length=ctx_len,
-                layer_types=layer_types_str
+                n_layers=model_config['n_layers'],
+                emb_dim=model_config['emb_dim'],
+                n_heads=model_config['n_heads'],
+                vocab_size=vocab_size,
+                context_length=model_config['context_length'],
+                layer_types=str(model_config.get('layer_types', []))
             )
             
             with open(os.path.join(output_dir, "README.md"), 'w') as f:
@@ -269,9 +253,9 @@ implementation:
                 file_path = os.path.join(output_dir, file)
                 if os.path.isfile(file_path):
                     size_mb = os.path.getsize(file_path) / 1e6
-                    print(f"{file} ({size_mb:.2f} MB)")
+                    print(f"  {file} ({size_mb:.2f} MB)")
             print("======================================")
-            print("\\n You can now:")
+            print("\nYou can now:")
             print("  1. Upload this directory to HuggingFace Hub")
             print("  2. Use it as input to GGUF conversion (requires local path support)")
             print("  3. Load it with: Gemma3Model.from_pretrained(output_dir)")
