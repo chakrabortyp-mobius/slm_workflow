@@ -21,30 +21,27 @@ implementation:
         import argparse
         import os
         import requests
-
         parser = argparse.ArgumentParser()
         parser.add_argument('--file', type=str, required=True)
         parser.add_argument('--file_path', type=str, required=True)
         args = parser.parse_args()
-
         print("=" * 70)
         print("DOWNLOADING file")
         print("=" * 70)
         print("Received URLs:")
         print("  - Model URL:", args.file)
-
         try:
-            # Download trained model from CDN
             print("1. Fetching file from CDN...")
             print("   URL:", args.file)
             resp_file = requests.get(args.file, timeout=300)
             resp_file.raise_for_status()
-            #resp_model.raise_for_status()
             
             os.makedirs(args.file_path, exist_ok=True)
-            with open(args.file_path, "wb") as f:
+            filename = os.path.basename(args.file)
+            full_path = os.path.join(args.file_path, filename)
+            with open(full_path, "wb") as f:
                 f.write(resp_file.content)
-            print("   Saved at:", args.file_path)
+            print("   Saved at:", full_path)
             print("   Size:", len(resp_file.content), "bytes")
             print()
             print("=" * 70)
