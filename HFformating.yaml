@@ -255,7 +255,7 @@ implementation:
                     size_mb = os.path.getsize(file_path) / 1e6
                     print(f"  {file} ({size_mb:.2f} MB)")
             print("======================================")
-            print("\\ nYou can now")
+            print("\\n You can now")
             print("  1. Upload this directory to HuggingFace Hub")
             print("  2. Use it as input to GGUF conversion (requires local path support)")
             print("  3. Load it with Gemma3Model.from_pretrained(output_dir)")
