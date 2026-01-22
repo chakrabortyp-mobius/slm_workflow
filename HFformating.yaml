@@ -258,7 +258,7 @@ implementation:
             print("\nYou can now:")
             print("  1. Upload this directory to HuggingFace Hub")
             print("  2. Use it as input to GGUF conversion (requires local path support)")
-            print("  3. Load it with: Gemma3Model.from_pretrained(output_dir)")
+            print("  3. Load it with Gemma3Model.from_pretrained(output_dir)")
             print("===============================")
         
         def main():
