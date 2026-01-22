@@ -129,6 +129,11 @@ implementation:
             
             os.makedirs(output_dir, exist_ok=True)
             print("[1/7] Loading model configuration...")
+            if os.path.isdir(model_config_path):
+                json_files = [f for f in os.listdir(model_config_path) if f.endswith('.json')]
+                if json_files:
+                    model_config_path = os.path.join(model_config_path, json_files[0])
+            
             with open(model_config_path, 'r') as f:
                 model_config = json.load(f)
             print(f"Loaded config with {model_config['n_layers']} layers")
@@ -166,6 +171,12 @@ implementation:
             
             print("[6/7] Converting model weights...")
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            # Handle both file and directory paths for model_weights
+            if os.path.isdir(model_weights_path):
+                weight_files = [f for f in os.listdir(model_weights_path) if f.endswith('.pth') or f.endswith('.pt')]
+                if weight_files:
+                    model_weights_path = os.path.join(model_weights_path, weight_files[0])
             
             Gemma3Model = load_model_class(model_py_path, "Gemma3Model")
             
