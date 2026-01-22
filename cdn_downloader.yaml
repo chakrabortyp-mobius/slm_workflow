@@ -1,4 +1,4 @@
-name: Download_GAT_Model_Files_from_CDN
+name: cdn_downloader
 description: Downloads trained model, embeddings data, metadata CSV, and config files from CDN URLs and saves them locally with proper directory structure.
 inputs:
   - {name: file, type: String}
