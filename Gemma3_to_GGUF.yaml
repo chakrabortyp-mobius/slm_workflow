@@ -20,7 +20,7 @@ outputs:
 
 implementation:
   container:
-    image: python:3.10
+    image: kushagra4761/nesy-factory-gpu:t2.6
     command:
       - sh
       - -c
